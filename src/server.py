@@ -1,8 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi import Body
 import uvicorn
 import os
 import http.client
 import json
+from typing import Any, Dict, Tuple
 
 app = FastAPI(title="unison-orchestrator")
 
@@ -16,11 +18,7 @@ POLICY_HOST = os.getenv("UNISON_POLICY_HOST", "policy")
 POLICY_PORT = os.getenv("UNISON_POLICY_PORT", "8083")
 
 
-def http_get_json(host: str, port: str, path: str):
-    """
-    Minimal internal GET.
-    Returns (ok: bool, status_code: int, body: dict|None)
-    """
+def http_get_json(host: str, port: str, path: str) -> Tuple[bool, int, dict | None]:
     try:
         conn = http.client.HTTPConnection(host, port, timeout=1.0)
         conn.request("GET", path)
@@ -37,11 +35,7 @@ def http_get_json(host: str, port: str, path: str):
         return (False, 0, None)
 
 
-def http_post_json(host: str, port: str, path: str, payload: dict):
-    """
-    Minimal internal POST with JSON body.
-    Returns (ok: bool, status_code: int, body: dict|None)
-    """
+def http_post_json(host: str, port: str, path: str, payload: dict) -> Tuple[bool, int, dict | None]:
     try:
         body_str = json.dumps(payload)
         headers = {
@@ -63,27 +57,52 @@ def http_post_json(host: str, port: str, path: str, payload: dict):
         return (False, 0, None)
 
 
+def validate_event(envelope: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Minimal structural validation aligned with unison-spec/specs/event-envelope.schema.json.
+    We are not doing full JSON Schema enforcement yet. Just required keys and types.
+    """
+    required_fields = ["timestamp", "source", "intent", "payload"]
+
+    if not isinstance(envelope, dict):
+        raise HTTPException(status_code=400, detail="Event must be an object")
+
+    for field in required_fields:
+        if field not in envelope:
+            raise HTTPException(status_code=400, detail=f"Missing required field '{field}'")
+
+    if not isinstance(envelope["timestamp"], str):
+        raise HTTPException(status_code=400, detail="timestamp must be string (ISO 8601)")
+
+    if not isinstance(envelope["source"], str):
+        raise HTTPException(status_code=400, detail="source must be string")
+
+    if not isinstance(envelope["intent"], str):
+        raise HTTPException(status_code=400, detail="intent must be string")
+
+    if not isinstance(envelope["payload"], dict):
+        raise HTTPException(status_code=400, detail="payload must be object")
+
+    # optional fields sanity check
+    if "auth_scope" in envelope and not isinstance(envelope["auth_scope"], str):
+        raise HTTPException(status_code=400, detail="auth_scope must be string if provided")
+
+    if "safety_context" in envelope and not isinstance(envelope["safety_context"], dict):
+        raise HTTPException(status_code=400, detail="safety_context must be object if provided")
+
+    return envelope
+
+
 @app.get("/health")
 def health():
-    # process is running
     return {"status": "ok", "service": "unison-orchestrator"}
 
 
 @app.post("/authorize")
 def authorize_stub():
-    """
-    Ask policy if a hypothetical action is allowed.
-    This is how orchestrator will gate high-risk actions in the future.
-
-    For now we send a hard-coded capability_id 'test.ACTION'
-    and a dummy context payload.
-    """
     payload = {
         "capability_id": "test.ACTION",
-        "context": {
-            "actor": "local-user",
-            "intent": "demo",
-        },
+        "context": {"actor": "local-user", "intent": "demo"},
     }
 
     ok, status_code, body = http_post_json(
@@ -102,18 +121,10 @@ def authorize_stub():
 
 @app.get("/ready")
 def ready():
-    """
-    Orchestrator is 'ready' if:
-    - context responds to /health
-    - storage responds to /health
-    - policy allows a sample action through /evaluate
-    """
-
     context_ok, _, _ = http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health")
     storage_ok, _, _ = http_get_json(STORAGE_HOST, STORAGE_PORT, "/health")
 
-    # call policy
-    payload = {
+    eval_payload = {
         "capability_id": "test.ACTION",
         "context": {
             "actor": "local-user",
@@ -124,10 +135,9 @@ def ready():
         POLICY_HOST,
         POLICY_PORT,
         "/evaluate",
-        payload,
+        eval_payload,
     )
 
-    # consider allowed only if policy responded AND decision.allowed == True
     allowed = False
     if policy_ok and isinstance(policy_body, dict):
         decision = policy_body.get("decision", {})
@@ -145,6 +155,71 @@ def ready():
     }
 
 
+@app.post("/event")
+def handle_event(envelope: dict = Body(...)):
+    """
+    This is the primary ingress for the system.
+
+    Flow:
+    1. Validate the envelope against required shape.
+    2. Ask policy if the requested intent is allowed.
+       - We treat envelope['intent'] as capability_id for now.
+       - We pass envelope['payload'] and caller metadata into policy.
+    3. Return a structured response.
+
+    Later:
+    - We'll call skills, generation, etc.
+    """
+    envelope = validate_event(envelope)
+
+    capability_id = envelope["intent"]
+    policy_context = {
+        "actor": envelope.get("source", "unknown"),
+        "payload_preview": envelope.get("payload", {}),
+        "auth_scope": envelope.get("auth_scope", None),
+    }
+
+    ok, status_code, policy_body = http_post_json(
+        POLICY_HOST,
+        POLICY_PORT,
+        "/evaluate",
+        {
+            "capability_id": capability_id,
+            "context": policy_context,
+        },
+    )
+
+    allowed = False
+    require_confirmation = False
+    reason = "no-decision"
+
+    if ok and isinstance(policy_body, dict):
+        decision_block = policy_body.get("decision", {})
+        allowed = bool(decision_block.get("allowed", False))
+        require_confirmation = bool(decision_block.get("require_confirmation", False))
+        reason = decision_block.get("reason", reason)
+
+    # if not allowed, surface denial
+    if not allowed:
+        return {
+            "accepted": False,
+            "reason": reason,
+            "require_confirmation": require_confirmation,
+            "policy_status": status_code,
+            "policy_raw": policy_body,
+        }
+
+    # stub "success" path
+    # in future this is where orchestrator will route to skills or generation
+    return {
+        "accepted": True,
+        "routed_intent": capability_id,
+        "payload": envelope["payload"],
+        "policy_status": status_code,
+        "policy_require_confirmation": require_confirmation,
+        "explanation": "stub dispatch not yet implemented"
+    }
+
+
 if __name__ == "__main__":
-    # listen on all interfaces for docker
     uvicorn.run(app, host="0.0.0.0", port=8080)
