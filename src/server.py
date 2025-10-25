@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException
-from fastapi import Body
+from fastapi import FastAPI, HTTPException, Body
 import uvicorn
 import os
 import http.client
 import json
 from typing import Any, Dict, Tuple
+from unison_common import validate_event_envelope, EnvelopeValidationError
 
 app = FastAPI(title="unison-orchestrator")
 
@@ -57,66 +57,9 @@ def http_post_json(host: str, port: str, path: str, payload: dict) -> Tuple[bool
         return (False, 0, None)
 
 
-def validate_event(envelope: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Minimal structural validation aligned with unison-spec/specs/event-envelope.schema.json.
-    We are not doing full JSON Schema enforcement yet. Just required keys and types.
-    """
-    required_fields = ["timestamp", "source", "intent", "payload"]
-
-    if not isinstance(envelope, dict):
-        raise HTTPException(status_code=400, detail="Event must be an object")
-
-    for field in required_fields:
-        if field not in envelope:
-            raise HTTPException(status_code=400, detail=f"Missing required field '{field}'")
-
-    if not isinstance(envelope["timestamp"], str):
-        raise HTTPException(status_code=400, detail="timestamp must be string (ISO 8601)")
-
-    if not isinstance(envelope["source"], str):
-        raise HTTPException(status_code=400, detail="source must be string")
-
-    if not isinstance(envelope["intent"], str):
-        raise HTTPException(status_code=400, detail="intent must be string")
-
-    if not isinstance(envelope["payload"], dict):
-        raise HTTPException(status_code=400, detail="payload must be object")
-
-    # optional fields sanity check
-    if "auth_scope" in envelope and not isinstance(envelope["auth_scope"], str):
-        raise HTTPException(status_code=400, detail="auth_scope must be string if provided")
-
-    if "safety_context" in envelope and not isinstance(envelope["safety_context"], dict):
-        raise HTTPException(status_code=400, detail="safety_context must be object if provided")
-
-    return envelope
-
-
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "unison-orchestrator"}
-
-
-@app.post("/authorize")
-def authorize_stub():
-    payload = {
-        "capability_id": "test.ACTION",
-        "context": {"actor": "local-user", "intent": "demo"},
-    }
-
-    ok, status_code, body = http_post_json(
-        POLICY_HOST,
-        POLICY_PORT,
-        "/evaluate",
-        payload,
-    )
-
-    return {
-        "policy_ok": ok,
-        "status_code": status_code,
-        "decision": body,
-    }
 
 
 @app.get("/ready")
@@ -126,10 +69,7 @@ def ready():
 
     eval_payload = {
         "capability_id": "test.ACTION",
-        "context": {
-            "actor": "local-user",
-            "intent": "readiness-check",
-        },
+        "context": {"actor": "local-user", "intent": "readiness-check"},
     }
     policy_ok, _, policy_body = http_post_json(
         POLICY_HOST,
@@ -157,20 +97,10 @@ def ready():
 
 @app.post("/event")
 def handle_event(envelope: dict = Body(...)):
-    """
-    This is the primary ingress for the system.
-
-    Flow:
-    1. Validate the envelope against required shape.
-    2. Ask policy if the requested intent is allowed.
-       - We treat envelope['intent'] as capability_id for now.
-       - We pass envelope['payload'] and caller metadata into policy.
-    3. Return a structured response.
-
-    Later:
-    - We'll call skills, generation, etc.
-    """
-    envelope = validate_event(envelope)
+    try:
+        envelope = validate_event_envelope(envelope)
+    except EnvelopeValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     capability_id = envelope["intent"]
     policy_context = {
@@ -183,10 +113,7 @@ def handle_event(envelope: dict = Body(...)):
         POLICY_HOST,
         POLICY_PORT,
         "/evaluate",
-        {
-            "capability_id": capability_id,
-            "context": policy_context,
-        },
+        {"capability_id": capability_id, "context": policy_context},
     )
 
     allowed = False
@@ -199,7 +126,6 @@ def handle_event(envelope: dict = Body(...)):
         require_confirmation = bool(decision_block.get("require_confirmation", False))
         reason = decision_block.get("reason", reason)
 
-    # if not allowed, surface denial
     if not allowed:
         return {
             "accepted": False,
@@ -209,15 +135,13 @@ def handle_event(envelope: dict = Body(...)):
             "policy_raw": policy_body,
         }
 
-    # stub "success" path
-    # in future this is where orchestrator will route to skills or generation
     return {
         "accepted": True,
         "routed_intent": capability_id,
         "payload": envelope["payload"],
         "policy_status": status_code,
         "policy_require_confirmation": require_confirmation,
-        "explanation": "stub dispatch not yet implemented"
+        "explanation": "stub dispatch not yet implemented",
     }
 
 
