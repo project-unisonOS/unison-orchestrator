@@ -1,20 +1,74 @@
-from fastapi import FastAPI, HTTPException, Body, Request
+from fastapi import FastAPI, HTTPException, Body, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.security import HTTPBearer
 import uvicorn
 import os
 import httpx
 import json
-from typing import Any, Dict, Tuple, List, Callable
-from unison_common import validate_event_envelope, EnvelopeValidationError
+from typing import Any, Dict, Tuple, List, Callable, Optional
+from unison_common import (
+    validate_event_envelope, 
+    EnvelopeValidationError,
+    verify_token,
+    verify_service_token,
+    require_roles,
+    require_role,
+    get_security_context,
+    add_security_headers,
+    get_cors_config,
+    AuthError,
+    PermissionError
+)
 from unison_common.logging import configure_logging, log_json
 from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
+from unison_common.auth import rate_limit
 import logging
 import uuid
 import time
 from collections import defaultdict
 
-app = FastAPI(title="unison-orchestrator")
+app = FastAPI(
+    title="unison-orchestrator",
+    description="Orchestration service for Unison platform",
+    version="1.0.0"
+)
 
 logger = configure_logging("unison-orchestrator")
+
+# Security middleware configuration
+cors_config = get_cors_config()
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    **cors_config
+)
+
+# Trusted hosts middleware (prevents host header attacks)
+allowed_hosts = os.getenv("UNISON_ALLOWED_HOSTS", "localhost,127.0.0.1,orchestrator").split(",")
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=allowed_hosts
+)
+
+# Security headers middleware
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    return add_security_headers(response)
+
+# Rate limiting middleware
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    # Apply rate limiting based on client IP
+    client_ip = request.client.host
+    try:
+        await rate_limit(f"ip:{client_ip}", limit=100, window=60)  # 100 requests per minute
+    except HTTPException as e:
+        return e
+    
+    return await call_next(request)
 
 # Simple in-memory metrics
 _metrics = defaultdict(int)
@@ -38,8 +92,6 @@ def http_post_json(host: str, port: str, path: str, payload: dict, headers: Dict
 
 def http_put_json(host: str, port: str, path: str, payload: dict, headers: Dict[str, str] | None = None) -> Tuple[bool, int, dict | None]:
     return http_put_json_with_retry(host, port, path, payload, headers=headers, max_retries=3, base_delay=0.1, max_delay=2.0, timeout=2.0)
-
-logger = configure_logging("unison-orchestrator")
 
 # --- ORCH-001: Skill/Intent registry (in-memory) ---
 Skill = Dict[str, Any]
@@ -89,44 +141,6 @@ def _handler_inference(envelope: Dict[str, Any]) -> Dict[str, Any]:
     else:
         return {"error": "Inference service unavailable", "event_id": event_id}
 
-# Register built-in skills
-_skills["echo"] = _handler_echo
-_skills["summarize.doc"] = _handler_inference
-_skills["analyze.code"] = _handler_inference
-_skills["translate.text"] = _handler_inference
-_skills["generate.idea"] = _handler_inference
-
-# --- Skill registry endpoints ---
-@app.get("/skills")
-def list_skills(request: Request):
-    event_id = request.headers.get("X-Event-ID")
-    log_json(logging.INFO, "skills_list", service="unison-orchestrator", event_id=event_id, count=len(_skills), intents=list(_skills.keys()))
-    return {"ok": True, "skills": list(_skills.keys()), "count": len(_skills)}
-
-@app.post("/skills")
-def register_skill(request: Request, body: Dict[str, Any] = Body(...)):
-    event_id = request.headers.get("X-Event-ID")
-    intent = body.get("intent")
-    if not isinstance(intent, str) or not intent:
-        raise HTTPException(status_code=400, detail="Invalid or missing 'intent'")
-    # In a real implementation we would validate a callable reference; for MVP we only support built-in intents
-    if intent in _skills:
-        raise HTTPException(status_code=409, detail=f"Intent '{intent}' already registered")
-    # MVP: only allow pre-defined built-in intents
-    allowed_builtin = {"summarize.doc", "context.get", "storage.put"}
-    if intent not in allowed_builtin:
-        raise HTTPException(status_code=400, detail=f"Intent '{intent}' not supported in MVP")
-    # Map to built-in handlers
-    if intent == "summarize.doc":
-        _skills[intent] = _handler_summarize_doc
-    elif intent == "context.get":
-        _skills[intent] = _handler_context_get
-    elif intent == "storage.put":
-        _skills[intent] = _handler_storage_put
-    log_json(logging.INFO, "skill_registered", service="unison-orchestrator", event_id=event_id, intent=intent)
-    return {"ok": True, "intent": intent}
-
-# --- Built-in skill handlers ---
 def _handler_summarize_doc(envelope: Dict[str, Any]) -> Dict[str, Any]:
     # MVP stub: return a canned summary; later integrate with inference service
     return {"summary": "This is a placeholder summary for summarize.doc."}
@@ -144,31 +158,41 @@ def _handler_context_get(envelope: Dict[str, Any]) -> Dict[str, Any]:
 
 def _handler_storage_put(envelope: Dict[str, Any]) -> Dict[str, Any]:
     payload = envelope.get("payload", {})
-    namespace = payload.get("namespace")
     key = payload.get("key")
     value = payload.get("value")
-    if not isinstance(namespace, str) or not isinstance(key, str):
-        raise ValueError("storage.put requires 'namespace' and 'key' in payload")
+    if not isinstance(key, str) or not key:
+        raise ValueError("storage.put requires 'key' string in payload")
+    if value is None:
+        raise ValueError("storage.put requires 'value' in payload")
     # Call Storage service KV PUT
-    ok, status, body = http_put_json(STORAGE_HOST, STORAGE_PORT, f"/kv/{namespace}/{key}", {"value": value})
+    ok, status, body = http_put_json(STORAGE_HOST, STORAGE_PORT, f"/kv/{key}", {"value": value})
     if not ok or not isinstance(body, dict):
         raise RuntimeError(f"Storage service error: {status}")
     return body
 
-# --- POL-002: Pending confirmations (in-memory) ---
+# Register built-in skills
+_skills["echo"] = _handler_echo
+_skills["summarize.doc"] = _handler_inference
+_skills["analyze.code"] = _handler_inference
+_skills["translate.text"] = _handler_inference
+_skills["generate.idea"] = _handler_inference
+_skills["context.get"] = _handler_context_get
+_skills["storage.put"] = _handler_storage_put
+
+# --- Confirmation tracking ---
 _pending_confirms: Dict[str, Dict[str, Any]] = {}
 
-def _prune_pending(now: float | None = None) -> None:
-    now = now or time.time()
-    if not _pending_confirms:
-        return
-    expired = [tok for tok, rec in _pending_confirms.items() if now - float(rec.get("created_at", now)) > CONFIRM_TTL_SECONDS]
+def _prune_pending():
+    now = time.time()
+    expired = [tok for tok, data in _pending_confirms.items() if data.get("expires_at", 0) < now]
     for tok in expired:
         _pending_confirms.pop(tok, None)
 
+# --- API Endpoints ---
+
 @app.get("/skills")
 def list_skills():
-    return {"skills": _skills}
+    return {"skills": list(_skills.keys()), "count": len(_skills)}
 
 @app.post("/skills")
 def add_skill(skill: Dict[str, Any] = Body(...)):
@@ -187,7 +211,6 @@ def add_skill(skill: Dict[str, Any] = Body(...)):
     _skills.append(entry)
     log_json(logging.INFO, "skill_added", service="unison-orchestrator", intent_prefix=prefix, handler=handler_name)
     return {"ok": True, "skill": entry}
-
 
 @app.get("/health")
 def health():
@@ -216,7 +239,6 @@ def metrics():
         f"unison_orchestrator_skills_registered {len(_skills)}",
     ])
     return "\n".join(lines)
-
 
 @app.get("/ready")
 def ready():
@@ -258,147 +280,137 @@ def ready():
     log_json(logging.INFO, "readiness", service="unison-orchestrator", event_id=rid, context=context_ok, storage=storage_ok, inference=inference_ok, policy_allowed=allowed, ready=all_ok)
     return resp
 
-
 @app.post("/event")
-def handle_event(envelope: dict = Body(...)):
+async def handle_event(
+    envelope: dict = Body(...),
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """Handle events with authentication and authorization"""
     _metrics["/event"] += 1
+    
+    # Create security context
+    security_ctx = get_security_context(current_user)
+    
     try:
+        # Validate and sanitize envelope
         envelope = validate_event_envelope(envelope)
     except EnvelopeValidationError as e:
+        log_json(
+            logging.WARNING,
+            "envelope_validation_failed",
+            service="unison-orchestrator",
+            error=str(e),
+            user=current_user.get("username"),
+            roles=current_user.get("roles", [])
+        )
         raise HTTPException(status_code=400, detail=str(e))
-
-    capability_id = envelope["intent"]
+    
+    # Add user context to envelope for policy evaluation
+    envelope["user"] = {
+        "username": current_user.get("username"),
+        "roles": current_user.get("roles", []),
+        "authenticated": True
+    }
+    
     event_id = str(uuid.uuid4())
-    log_json(logging.INFO, "event_received", service="unison-orchestrator", event_id=event_id, source=envelope.get("source"), intent=capability_id)
-    steps: List[Dict[str, Any]] = []
-    steps.append({"step": "validate", "ok": True})
-    policy_context = {
-        "actor": envelope.get("source", "unknown"),
-        "payload_preview": envelope.get("payload", {}),
-        "auth_scope": envelope.get("auth_scope", None),
-        "safety_context": envelope.get("safety_context", None),
-    }
-
-    ok, status_code, policy_body = http_post_json(
-        POLICY_HOST,
-        POLICY_PORT,
-        "/evaluate",
-        {"capability_id": capability_id, "context": policy_context},
-        headers={"X-Event-ID": event_id},
-    )
-
-    allowed = False
-    require_confirmation = False
-    reason = "no-decision"
-    suggested_alternative: str | None = None
-
-    if ok and isinstance(policy_body, dict):
-        decision_block = policy_body.get("decision", {})
-        allowed = bool(decision_block.get("allowed", False))
-        require_confirmation = bool(decision_block.get("require_confirmation", False))
-        reason = decision_block.get("reason", reason)
-        suggested_alternative = decision_block.get("suggested_alternative")
-
-    steps.append({"step": "policy", "ok": bool(allowed), "status": status_code, "reason": reason, "suggested_alternative": suggested_alternative})
-
-    if not allowed:
-        _prune_pending()
-        # Require confirmation path
-        if require_confirmation:
-            token = str(uuid.uuid4())
-            _pending_confirms[token] = {
-                "envelope": envelope,
-                "matched": None,
-                "handler_name": None,
-                "created_at": time.time(),
-                "expires_at": time.time() + CONFIRM_TTL_SECONDS,
-            }
-            # Pre-compute matching so confirm can be deterministic
-            if capability_id in _skills:
-                _pending_confirms[token]["handler_name"] = capability_id
-            else:
-                _pending_confirms[token]["handler_name"] = "echo"
-
-            # Persist to storage for durability
-            rec = {
-                "envelope": envelope,
-                "matched": _pending_confirms[token].get("matched"),
-                "handler_name": _pending_confirms[token].get("handler_name"),
-                "created_at": _pending_confirms[token]["created_at"],
-                "expires_at": _pending_confirms[token]["expires_at"],
-                "used": False,
-            }
-            _ok, _st, _ = http_put_json(
-                STORAGE_HOST,
-                STORAGE_PORT,
-                f"/kv/confirm/{token}",
-                {"value": rec},
-                headers={"X-Event-ID": event_id},
-            )
-
-            log_json(logging.INFO, "event_requires_confirmation", service="unison-orchestrator", event_id=event_id, intent=capability_id, reason=reason, token=token, suggested_alternative=suggested_alternative)
-            return {
-                "accepted": False,
-                "reason": reason,
-                "require_confirmation": True,
-                "confirmation_token": token,
-                "confirmation_ttl_seconds": CONFIRM_TTL_SECONDS,
-                "policy_status": status_code,
-                "policy_raw": policy_body,
-                "policy_suggested_alternative": suggested_alternative,
-                "event_id": event_id,
-                "steps": steps,
-            }
-
-        # Hard deny path
-        log_json(logging.INFO, "event_blocked", service="unison-orchestrator", event_id=event_id, intent=capability_id, reason=reason, require_confirmation=False, policy_status=status_code, suggested_alternative=suggested_alternative)
-        return {
-            "accepted": False,
-            "reason": reason,
-            "require_confirmation": False,
-            "policy_status": status_code,
-            "policy_raw": policy_body,
-            "policy_suggested_alternative": suggested_alternative,
-            "event_id": event_id,
-            "steps": steps,
-        }
-
-    # Route to a registered skill by intent; default to echo
-    handler_name = capability_id if capability_id in _skills else "echo"
-    handler_fn = _skills.get(handler_name, _handler_echo)
-    # Optional context fetch before handling (no matched metadata in this MVP)
-    fetched_context: Dict[str, Any] | None = None
-    # If source is io-speech or io-vision, we may want to attach transcript or image_url to outputs for downstream response
+    intent = envelope.get("intent", "")
     source = envelope.get("source", "")
-    if source == "io-speech" and "transcript" in envelope.get("payload", {}):
-        outputs = handler_fn(envelope)
-        if isinstance(outputs, dict):
-            outputs["transcript"] = envelope["payload"]["transcript"]
-    elif source == "io-vision" and "image_url" in envelope.get("payload", {}):
-        outputs = handler_fn(envelope)
-        if isinstance(outputs, dict):
-            outputs["image_url"] = envelope["payload"]["image_url"]
-    else:
-        outputs = handler_fn(envelope)
-    if fetched_context is not None and isinstance(outputs, dict):
-        outputs.setdefault("context", fetched_context)
-
-    steps.append({"step": "handler", "ok": True, "name": handler_name})
-    log_json(logging.INFO, "event_accepted", service="unison-orchestrator", event_id=event_id, intent=capability_id, policy_status=status_code, require_confirmation=require_confirmation, handler=handler_name, suggested_alternative=suggested_alternative)
-    return {
-        "accepted": True,
-        "routed_intent": capability_id,
-        "payload": envelope["payload"],
-        "policy_status": status_code,
-        "policy_require_confirmation": require_confirmation,
-        "policy_suggested_alternative": suggested_alternative,
-        "explanation": "stub handler executed",
-        "handled_by": handler_name,
-        "outputs": outputs,
-        "event_id": event_id,
-        "steps": steps,
+    payload = envelope.get("payload", {})
+    
+    log_json(
+        logging.INFO,
+        "event_received",
+        service="unison-orchestrator",
+        event_id=event_id,
+        intent=intent,
+        source=source,
+        user=current_user.get("username"),
+        roles=current_user.get("roles", [])
+    )
+    
+    # Check if intent exists in skills registry
+    handler = _skills.get(intent)
+    if not handler:
+        log_json(
+            logging.WARNING,
+            "unknown_intent",
+            service="unison-orchestrator",
+            event_id=event_id,
+            intent=intent,
+            user=current_user.get("username")
+        )
+        raise HTTPException(status_code=404, detail=f"Unknown intent: {intent}")
+    
+    # Policy evaluation - check if user is allowed to execute this intent
+    eval_payload = {
+        "capability_id": f"unison.{intent}",
+        "context": {
+            "actor": current_user.get("username"),
+            "intent": intent,
+            "source": source,
+            "auth_scope": envelope.get("auth_scope"),
+            "safety_context": envelope.get("safety_context"),
+            "user_roles": current_user.get("roles", [])
+        },
     }
-
+    
+    policy_ok, _, policy_body = http_post_json(
+        POLICY_HOST, POLICY_PORT, "/evaluate", eval_payload,
+        headers={"X-Event-ID": event_id}
+    )
+    
+    allowed = False
+    if policy_ok and isinstance(policy_body, dict):
+        decision = policy_body.get("decision", {})
+        allowed = decision.get("allowed", False) is True
+    
+    if not allowed:
+        reason = decision.get("reason", "Policy denied")
+        log_json(
+            logging.WARNING,
+            "policy_denied",
+            service="unison-orchestrator",
+            event_id=event_id,
+            intent=intent,
+            reason=reason,
+            user=current_user.get("username"),
+            roles=current_user.get("roles", [])
+        )
+        raise HTTPException(status_code=403, detail=f"Policy denied: {reason}")
+    
+    # Execute the skill handler
+    try:
+        result = handler(envelope)
+        
+        log_json(
+            logging.INFO,
+            "event_completed",
+            service="unison-orchestrator",
+            event_id=event_id,
+            intent=intent,
+            user=current_user.get("username"),
+            success=True
+        )
+        
+        return {
+            "ok": True,
+            "event_id": event_id,
+            "intent": intent,
+            "result": result,
+            "user": current_user.get("username")
+        }
+        
+    except Exception as e:
+        log_json(
+            logging.ERROR,
+            "handler_error",
+            service="unison-orchestrator",
+            event_id=event_id,
+            intent=intent,
+            error=str(e),
+            user=current_user.get("username")
+        )
+        raise HTTPException(status_code=500, detail=f"Handler error: {str(e)}")
 
 @app.get("/introspect")
 def introspect():
@@ -435,7 +447,6 @@ def introspect():
     )
     return result
 
-
 @app.post("/event/confirm")
 def confirm_event(body: Dict[str, Any] = Body(...)):
     _metrics["/event/confirm"] += 1
@@ -446,88 +457,54 @@ def confirm_event(body: Dict[str, Any] = Body(...)):
         # Attempt to load from storage for durability across restarts
         ok_s, st_s, body_s = http_get_json(STORAGE_HOST, STORAGE_PORT, f"/kv/confirm/{token}")
         if not ok_s or not isinstance(body_s, dict) or not body_s.get("ok"):
-            log_json(logging.INFO, "confirm_load_failed", service="unison-orchestrator", token=token, storage_ok=ok_s, status=st_s, body_type=type(body_s).__name__)
-            raise HTTPException(status_code=400, detail="invalid or expired token")
-        value = body_s.get("value") or {}
-        # Validate token not used/expired
-        now = time.time()
-        try:
-            exp = float(value.get("expires_at") or now)
-        except Exception:
-            exp = now
-        if bool(value.get("used")) or now > exp:
-            log_json(logging.INFO, "confirm_invalid", service="unison-orchestrator", token=token, used=bool(value.get("used")), now=now, exp=exp)
-            raise HTTPException(status_code=400, detail="invalid or expired token")
-        # Use storage-loaded record directly (no in-memory requirement)
-        pending = {
-            "envelope": value.get("envelope", {}),
-            "matched": value.get("matched"),
-            "handler_name": value.get("handler_name"),
-            "created_at": value.get("created_at", now),
-            "expires_at": exp,
-        }
-        log_json(logging.INFO, "confirm_loaded_from_storage", service="unison-orchestrator", token=token)
-    else:
-        # Use and remove in-memory pending
-        pending = _pending_confirms.pop(token)
-    envelope: Dict[str, Any] = pending.get("envelope", {})
-    capability_id = envelope.get("intent")
-    event_id = str(uuid.uuid4())
-    steps: List[Dict[str, Any]] = [{"step": "confirm", "ok": True}]
-
-    # Execute the same routing as /event but skip policy
-    matched = pending.get("matched")
-    handler_name = pending.get("handler_name") or "echo"
-    handler_fn = _skills.get(handler_name, _handler_echo)
-
-    # Optional context fetch per stored match
-    fetched_context: Dict[str, Any] | None = None
-    if matched and isinstance(matched.get("context_keys"), list) and matched["context_keys"]:
-        ctx_ok, ctx_status, ctx_body = http_post_json(
-            CONTEXT_HOST,
-            CONTEXT_PORT,
-            "/kv/get",
-            {"keys": matched["context_keys"]},
-            headers={"X-Event-ID": event_id},
-        )
-        if ctx_ok and isinstance(ctx_body, dict) and ctx_body.get("ok"):
-            fetched_context = ctx_body.get("values", {})
-            steps.append({"step": "context_get", "ok": True, "keys": len(matched["context_keys"])})
-        else:
-            steps.append({"step": "context_get", "ok": False, "status": ctx_status})
-
-    outputs = handler_fn(envelope)
-    if fetched_context is not None and isinstance(outputs, dict):
-        outputs.setdefault("context", fetched_context)
-
-    steps.append({"step": "handler", "ok": True, "name": handler_name})
-    log_json(logging.INFO, "event_confirmed", service="unison-orchestrator", event_id=event_id, intent=capability_id, handled_by=handler_name)
-
-    # Mark token as used in storage (best-effort)
-    try:
-        used_rec = {
+            raise HTTPException(status_code=404, detail="Invalid or expired confirmation token")
+        envelope = body_s.get("envelope")
+        if not envelope:
+            raise HTTPException(status_code=404, detail="Confirmation token corrupted")
+        _pending_confirms[token] = {
             "envelope": envelope,
-            "matched": matched,
-            "handler_name": handler_name,
-            "created_at": pending.get("created_at"),
-            "expires_at": pending.get("expires_at"),
-            "used": True,
-            "used_at": time.time(),
+            "matched": None,
+            "handler_name": None,
+            "created_at": time.time(),
+            "expires_at": time.time() + CONFIRM_TTL_SECONDS,
         }
-        http_put_json(STORAGE_HOST, STORAGE_PORT, f"/kv/confirm/{token}", {"value": used_rec}, headers={"X-Event-ID": event_id})
-    except Exception:
-        pass
-    return {
-        "accepted": True,
-        "routed_intent": capability_id,
-        "payload": envelope.get("payload"),
-        "explanation": "confirmed and executed",
-        "handled_by": handler_name,
-        "outputs": outputs,
-        "event_id": event_id,
-        "steps": steps,
-    }
+    
+    data = _pending_confirms[token]
+    envelope = data["envelope"]
+    event_id = str(uuid.uuid4())
+    intent = envelope.get("intent", "")
+    
+    # Dispatch to handler
+    handler = _skills.get(intent)
+    if not handler:
+        raise HTTPException(status_code=404, detail=f"Intent {intent} not found")
+    
+    try:
+        result = handler(envelope)
+        # Clean up confirmation
+        _pending_confirms.pop(token, None)
+        # Remove from storage
+        http_post_json(STORAGE_HOST, STORAGE_PORT, f"/kv/delete/confirm/{token}", {})
+        log_json(logging.INFO, "confirm_completed", service="unison-orchestrator", event_id=event_id, intent=intent, token=token)
+        return {
+            "ok": True,
+            "event_id": event_id,
+            "intent": intent,
+            "result": result,
+            "confirmed": True
+        }
+    except Exception as e:
+        log_json(logging.ERROR, "confirm_handler_error", service="unison-orchestrator", event_id=event_id, intent=intent, error=str(e), token=token)
+        raise HTTPException(status_code=500, detail=f"Handler error: {str(e)}")
 
+# Handler mapping for dynamic skill registration
+_HANDLERS = {
+    "echo": _handler_echo,
+    "summarize.doc": _handler_summarize_doc,
+    "context.get": _handler_context_get,
+    "storage.put": _handler_storage_put,
+    "inference": _handler_inference,
+}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
