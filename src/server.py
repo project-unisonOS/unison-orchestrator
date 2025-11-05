@@ -7,6 +7,7 @@ import os
 import httpx
 import json
 from typing import Any, Dict, Tuple, List, Callable, Optional
+import asyncio
 from unison_common import (
     validate_event_envelope, 
     EnvelopeValidationError,
@@ -18,7 +19,10 @@ from unison_common import (
     add_security_headers,
     get_cors_config,
     AuthError,
-    PermissionError
+    PermissionError,
+    verify_consent_grant_locally,
+    check_grant_scope,
+    require_consent_grant
 )
 from unison_common.logging import configure_logging, log_json
 from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
@@ -511,21 +515,27 @@ _HANDLERS = {
 
 # Skills already registered above (lines 174-180)
 
-# --- GoldenPath v0: /ingest ---
+# --- GoldenPath v1: /ingest with Consent Grants ---
 @app.post("/ingest")
-def ingest(
+async def ingest(
     body: Dict[str, Any] = Body(...),
-    current_user: Dict[str, Any] = Depends(verify_token)
+    current_user: Dict[str, Any] = Depends(verify_token),
+    grant_token: str = Body(None, description="Consent grant JWT for authorization")
 ):
-    """GoldenPath v0: ingest -> context lookup -> policy verify -> echo -> render.
-    Request body example: {"message": "hello", "source": "io-speech"}
+    """GoldenPath v1: ingest -> context lookup -> consent grant verify -> echo -> render.
+    Request body example: {"message": "hello", "source": "io-speech", "grant_token": "jwt..."}
     """
     _metrics["/ingest"] += 1
 
     message = body.get("message", "")
     source = body.get("source", "io")
+    grant_token = body.get("grant_token") or grant_token
+    
     if not isinstance(message, str) or message == "":
         raise HTTPException(status_code=400, detail="message is required")
+    
+    if not grant_token:
+        raise HTTPException(status_code=400, detail="grant_token is required")
 
     # Correlation / request id propagation
     event_id = str(uuid.uuid4())
@@ -534,23 +544,45 @@ def ingest(
     hdrs = {"X-Event-ID": event_id}
     http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health", headers=hdrs)
 
-    # Policy evaluation (local call to policy service)
-    eval_payload = {
-        "capability_id": "unison.echo",
-        "context": {
-            "actor": current_user.get("username"),
-            "intent": "echo",
-            "source": source,
-            "user_roles": current_user.get("roles", [])
-        },
-    }
-    allowed = False
-    pol_ok, _, pol_body = http_post_json(POLICY_HOST, POLICY_PORT, "/evaluate", eval_payload, headers={"X-Event-ID": event_id})
-    if pol_ok and isinstance(pol_body, dict):
-        decision = pol_body.get("decision", {})
-        allowed = decision.get("allowed", False) is True
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Policy denied")
+    # Consent grant verification (local JWT verification - no network call)
+    try:
+        grant_payload = verify_consent_grant_locally(grant_token)
+        
+        # Verify grant has required scope for echo capability
+        if not check_grant_scope(grant_payload, "unison.echo"):
+            raise HTTPException(
+                status_code=403, 
+                detail="Consent grant does not include required scope: unison.echo"
+            )
+        
+        # Verify grant is for the correct subject
+        if grant_payload.get("sub") != current_user.get("username"):
+            raise HTTPException(
+                status_code=403,
+                detail="Consent grant subject does not match authenticated user"
+            )
+        
+        log_json(
+            logging.INFO,
+            "consent_grant_verified",
+            service="unison-orchestrator",
+            event_id=event_id,
+            grant_jti=grant_payload.get("jti"),
+            grant_scopes=grant_payload.get("scopes"),
+            grant_purpose=grant_payload.get("purpose"),
+            user=current_user.get("username")
+        )
+        
+    except AuthError as e:
+        log_json(
+            logging.WARNING,
+            "consent_grant_denied",
+            service="unison-orchestrator",
+            event_id=event_id,
+            error=str(e),
+            user=current_user.get("username")
+        )
+        raise HTTPException(status_code=403, detail=f"Consent grant verification failed: {str(e)}")
 
     # Execute echo skill
     envelope = {
@@ -560,6 +592,11 @@ def ingest(
         "user": {
             "username": current_user.get("username"),
             "roles": current_user.get("roles", [])
+        },
+        "grant": {
+            "jti": grant_payload.get("jti"),
+            "scopes": grant_payload.get("scopes"),
+            "purpose": grant_payload.get("purpose")
         }
     }
     result = _skills["echo"](envelope)
@@ -573,6 +610,70 @@ def ingest(
         ]
     }
     return rendered
+
+# --- Grant Testing Endpoint ---
+@app.post("/test-grant")
+async def test_grant(
+    body: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """Test endpoint to issue and verify consent grants"""
+    action = body.get("action", "verify")
+    
+    if action == "issue":
+        # Issue a new grant from consent service
+        grant_request = {
+            "subject": current_user.get("username"),
+            "scopes": body.get("scopes", ["unison.echo"]),
+            "purpose": body.get("purpose", "Testing"),
+            "ttl": body.get("ttl", 3600),
+            "audience": "orchestrator"
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    f"http://localhost:7072/grants",
+                    json=grant_request
+                )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Grant issuance failed: {response.text}"
+                )
+                
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to issue grant: {str(e)}")
+    
+    elif action == "verify":
+        # Verify an existing grant
+        grant_token = body.get("grant_token")
+        if not grant_token:
+            raise HTTPException(status_code=400, detail="grant_token is required")
+        
+        try:
+            grant_payload = verify_consent_grant_locally(grant_token)
+            return {
+                "valid": True,
+                "grant": {
+                    "jti": grant_payload.get("jti"),
+                    "subject": grant_payload.get("sub"),
+                    "scopes": grant_payload.get("scopes"),
+                    "purpose": grant_payload.get("purpose"),
+                    "expires_at": grant_payload.get("exp")
+                }
+            }
+        except AuthError as e:
+            return {
+                "valid": False,
+                "error": str(e)
+            }
+    
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action. Use 'issue' or 'verify'")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
