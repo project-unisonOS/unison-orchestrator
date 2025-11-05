@@ -172,7 +172,7 @@ def _handler_storage_put(envelope: Dict[str, Any]) -> Dict[str, Any]:
 
 # Register built-in skills
 _skills["echo"] = _handler_echo
-_skills["summarize.doc"] = _handler_inference
+_skills["summarize.doc"] = _handler_summarize_doc
 _skills["analyze.code"] = _handler_inference
 _skills["translate.text"] = _handler_inference
 _skills["generate.idea"] = _handler_inference
@@ -205,10 +205,13 @@ def add_skill(skill: Dict[str, Any] = Body(...)):
     context_keys = skill.get("context_keys")
     if context_keys is not None and not isinstance(context_keys, list):
         raise HTTPException(status_code=400, detail="context_keys must be a list if provided")
+    # Register handler function in the skills map (dict), keyed by intent prefix
+    if prefix in _skills:
+        raise HTTPException(status_code=409, detail=f"intent_prefix already registered: {prefix}")
+    _skills[prefix] = _HANDLERS[handler_name]
     entry = {"intent_prefix": prefix, "handler": handler_name}
     if context_keys:
         entry["context_keys"] = context_keys
-    _skills.append(entry)
     log_json(logging.INFO, "skill_added", service="unison-orchestrator", intent_prefix=prefix, handler=handler_name)
     return {"ok": True, "skill": entry}
 
@@ -491,7 +494,7 @@ def confirm_event(body: Dict[str, Any] = Body(...)):
             "event_id": event_id,
             "intent": intent,
             "result": result,
-            "confirmed": True
+            "confirmed": True,
         }
     except Exception as e:
         log_json(logging.ERROR, "confirm_handler_error", service="unison-orchestrator", event_id=event_id, intent=intent, error=str(e), token=token)
@@ -500,11 +503,76 @@ def confirm_event(body: Dict[str, Any] = Body(...)):
 # Handler mapping for dynamic skill registration
 _HANDLERS = {
     "echo": _handler_echo,
-    "summarize.doc": _handler_summarize_doc,
-    "context.get": _handler_context_get,
-    "storage.put": _handler_storage_put,
     "inference": _handler_inference,
+    "summarize_doc": _handler_summarize_doc,
+    "context_get": _handler_context_get,
+    "storage_put": _handler_storage_put,
 }
+
+# Skills already registered above (lines 174-180)
+
+# --- GoldenPath v0: /ingest ---
+@app.post("/ingest")
+def ingest(
+    body: Dict[str, Any] = Body(...),
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """GoldenPath v0: ingest -> context lookup -> policy verify -> echo -> render.
+    Request body example: {"message": "hello", "source": "io-speech"}
+    """
+    _metrics["/ingest"] += 1
+
+    message = body.get("message", "")
+    source = body.get("source", "io")
+    if not isinstance(message, str) or message == "":
+        raise HTTPException(status_code=400, detail="message is required")
+
+    # Correlation / request id propagation
+    event_id = str(uuid.uuid4())
+
+    # Optional: fetch minimal context snapshot (health as proxy)
+    hdrs = {"X-Event-ID": event_id}
+    http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health", headers=hdrs)
+
+    # Policy evaluation (local call to policy service)
+    eval_payload = {
+        "capability_id": "unison.echo",
+        "context": {
+            "actor": current_user.get("username"),
+            "intent": "echo",
+            "source": source,
+            "user_roles": current_user.get("roles", [])
+        },
+    }
+    allowed = False
+    pol_ok, _, pol_body = http_post_json(POLICY_HOST, POLICY_PORT, "/evaluate", eval_payload, headers={"X-Event-ID": event_id})
+    if pol_ok and isinstance(pol_body, dict):
+        decision = pol_body.get("decision", {})
+        allowed = decision.get("allowed", False) is True
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Policy denied")
+
+    # Execute echo skill
+    envelope = {
+        "intent": "echo",
+        "source": source,
+        "payload": {"message": message},
+        "user": {
+            "username": current_user.get("username"),
+            "roles": current_user.get("roles", [])
+        }
+    }
+    result = _skills["echo"](envelope)
+
+    # Minimal render block response
+    rendered = {
+        "ok": True,
+        "event_id": event_id,
+        "blocks": [
+            {"type": "text", "text": result.get("echo", {}).get("message", message)}
+        ]
+    }
+    return rendered
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)

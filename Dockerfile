@@ -2,14 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r ./requirements.txt
+COPY unison-orchestrator/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r ./requirements.txt \
+    && pip install --no-cache-dir redis python-jose[cryptography] bleach httpx
 
-# Copy orchestrator source
-# Expecting build context at repo root
-COPY src ./src
-# Copy vendored minimal unison_common into src so it's on sys.path
-COPY unison_common ./src/unison_common
+# Copy orchestrator source (from monorepo root context)
+COPY unison-orchestrator/src ./src
+# Copy shared unison_common into src so it's on sys.path
+COPY unison-common/src/unison_common ./src/unison_common
 
 # Ensure Python can import from /app/src
 ENV PYTHONPATH=/app/src
