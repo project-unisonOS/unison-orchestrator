@@ -1,0 +1,115 @@
+# Example Routing Rules for Unison Orchestrator
+# These rules demonstrate different routing capabilities
+
+# Voice assistant routing rules
+- id: "voice-echo-rule"
+  intent_prefix: "echo"
+  skill_id: "echo"
+  priority: 10
+  conditions:
+    sources: ["io-speech", "voice"]
+    required_roles: ["user", "admin"]
+  description: "Route echo requests from voice inputs"
+
+- id: "voice-translation-rule"
+  intent_prefix: "translate"
+  skill_id: "inference"
+  priority: 10
+  conditions:
+    sources: ["io-speech", "voice"]
+    required_roles: ["user", "admin"]
+  description: "Route translation requests to inference service"
+
+# Developer-focused routing rules
+- id: "code-analysis-rule"
+  intent_prefix: "analyze.code"
+  skill_id: "inference"
+  priority: 20
+  conditions:
+    sources: ["web", "api", "ide"]
+    required_roles: ["developer", "admin"]
+    time_window:
+      start: 0
+      end: 23
+  description: "Route code analysis for developers"
+
+- id: "code-generation-rule"
+  intent_prefix: "generate"
+  skill_id: "inference"
+  priority: 20
+  conditions:
+    sources: ["web", "api", "ide"]
+    required_roles: ["developer", "admin"]
+    payload_conditions:
+      provider: "openai"
+  description: "Route code generation with specific provider"
+
+# Document processing rules
+- id: "document-summary-rule"
+  intent_prefix: "summarize"
+  skill_id: "inference"
+  priority: 15
+  conditions:
+    sources: ["web", "api", "upload"]
+    required_roles: ["user", "developer", "admin"]
+  description: "Route document summarization requests"
+
+- id: "document-analysis-rule"
+  intent_prefix: "analyze.doc"
+  skill_id: "inference"
+  priority: 15
+  conditions:
+    sources: ["web", "api", "upload"]
+    required_roles: ["user", "developer", "admin"]
+  description: "Route document analysis requests"
+
+# Storage and context rules
+- id: "context-retrieval-rule"
+  intent_prefix: "context.get"
+  skill_id: "context_get"
+  priority: 30
+  conditions:
+    sources: ["api", "web", "internal"]
+    required_roles: ["user", "developer", "admin"]
+  description: "Route context retrieval requests"
+
+- id: "storage-write-rule"
+  intent_prefix: "storage.put"
+  skill_id: "storage_put"
+  priority: 30
+  conditions:
+    sources: ["api", "web", "internal"]
+    required_roles: ["user", "developer", "admin"]
+  description: "Route storage write requests"
+
+# Admin-specific rules
+- id: "admin-operations-rule"
+  intent_prefix: "admin"
+  skill_id: "echo"
+  priority: 5
+  conditions:
+    sources: ["admin", "internal"]
+    required_roles: ["admin"]
+    time_window:
+      start: 9
+      end: 17
+  description: "Route admin operations during business hours"
+
+# Fallback rules (lower priority)
+- id: "fallback-inference-rule"
+  intent_prefix: "inference"
+  skill_id: "inference"
+  priority: 100
+  conditions:
+    sources: ["*"]
+    required_roles: ["user", "developer", "admin"]
+  description: "Fallback rule for general inference requests"
+
+- id: "fallback-echo-rule"
+  intent_prefix: "echo"
+  skill_id: "echo"
+  priority: 100
+  conditions:
+    sources: ["*"]
+    required_roles: ["user", "developer", "admin"]
+  description: "Fallback rule for echo requests"

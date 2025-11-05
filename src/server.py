@@ -27,6 +27,7 @@ from unison_common import (
 from unison_common.logging import configure_logging, log_json
 from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
 from unison_common.auth import rate_limit
+from router import Router, RoutingStrategy, RoutingContext, RouteCandidate
 import logging
 import uuid
 import time
@@ -77,6 +78,10 @@ async def rate_limit_middleware(request: Request, call_next):
 # Simple in-memory metrics
 _metrics = defaultdict(int)
 _start_time = time.time()
+
+# Router configuration
+ROUTING_STRATEGY = os.getenv("UNISON_ROUTING_STRATEGY", "rule_based")
+router = Router(RoutingStrategy(ROUTING_STRATEGY))
 
 CONTEXT_HOST = os.getenv("UNISON_CONTEXT_HOST", "context")
 CONTEXT_PORT = os.getenv("UNISON_CONTEXT_PORT", "8081")
@@ -246,6 +251,85 @@ def metrics():
         f"unison_orchestrator_skills_registered {len(_skills)}",
     ])
     return "\n".join(lines)
+
+# --- Router Management Endpoints ---
+
+@app.get("/router/config")
+def get_router_config():
+    """Get current router configuration"""
+    return {
+        "strategy": router.get_strategy_name(),
+        "metrics": router.get_metrics()
+    }
+
+@app.post("/router/strategy")
+def set_routing_strategy(strategy: str = Body(..., embed=True)):
+    """Change routing strategy"""
+    try:
+        routing_strategy = RoutingStrategy(strategy)
+        router.set_strategy(routing_strategy)
+        log_json(logging.INFO, "router_strategy_changed", 
+                service="unison-orchestrator", 
+                strategy=strategy)
+        return {"ok": True, "strategy": strategy}
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy: {strategy}")
+
+@app.post("/router/rules")
+def add_routing_rule(rule: Dict[str, Any] = Body(...)):
+    """Add a routing rule (for rule-based and hybrid strategies)"""
+    try:
+        router.add_routing_rule(rule)
+        log_json(logging.INFO, "routing_rule_added", 
+                service="unison-orchestrator", 
+                rule_id=rule.get('id'),
+                intent_prefix=rule.get('intent_prefix'))
+        return {"ok": True, "rule": rule}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/router/rules")
+def get_routing_rules():
+    """Get current routing rules (if available)"""
+    if hasattr(router.router, 'rules'):
+        return {"rules": router.router.rules}
+    else:
+        return {"rules": [], "message": "Current strategy does not support rules"}
+
+@app.post("/router/test")
+def test_routing(request_body: Dict[str, Any] = Body(...)):
+    """Test routing without executing the skill"""
+    intent = request_body.get("intent", "")
+    payload = request_body.get("payload", {})
+    user = request_body.get("user", {"username": "test", "roles": ["user"]})
+    source = request_body.get("source", "test")
+    
+    # Create routing context
+    context = RoutingContext(
+        intent=intent,
+        payload=payload,
+        user=user,
+        source=source,
+        event_id=str(uuid.uuid4()),
+        timestamp=time.time()
+    )
+    
+    # Test routing
+    candidate = router.route(context, _skills)
+    
+    if candidate:
+        return {
+            "routed": True,
+            "skill_id": candidate.skill_id,
+            "strategy_used": candidate.strategy_used,
+            "score": candidate.score,
+            "metadata": candidate.metadata
+        }
+    else:
+        return {
+            "routed": False,
+            "message": "No matching skill found"
+        }
 
 @app.get("/ready")
 def ready():
@@ -584,7 +668,7 @@ async def ingest(
         )
         raise HTTPException(status_code=403, detail=f"Consent grant verification failed: {str(e)}")
 
-    # Execute echo skill
+    # Route and execute skill using router
     envelope = {
         "intent": "echo",
         "source": source,
@@ -597,14 +681,66 @@ async def ingest(
             "jti": grant_payload.get("jti"),
             "scopes": grant_payload.get("scopes"),
             "purpose": grant_payload.get("purpose")
-        }
+        },
+        "event_id": event_id
     }
-    result = _skills["echo"](envelope)
+    
+    # Create routing context
+    routing_context = RoutingContext(
+        intent="echo",
+        payload=envelope["payload"],
+        user=envelope["user"],
+        source=source,
+        event_id=event_id,
+        timestamp=time.time()
+    )
+    
+    # Route to appropriate skill
+    candidate = router.route(routing_context, _skills)
+    
+    if not candidate:
+        log_json(
+            logging.WARNING,
+            "routing_failed",
+            service="unison-orchestrator",
+            event_id=event_id,
+            intent="echo",
+            strategy=router.get_strategy_name()
+        )
+        raise HTTPException(status_code=404, detail="No suitable skill found for request")
+    
+    # Execute the routed skill
+    try:
+        result = candidate.handler(envelope)
+        
+        log_json(
+            logging.INFO,
+            "skill_executed",
+            service="unison-orchestrator",
+            event_id=event_id,
+            skill_id=candidate.skill_id,
+            strategy_used=candidate.strategy_used,
+            routing_score=candidate.score
+        )
+        
+    except Exception as e:
+        log_json(
+            logging.ERROR,
+            "skill_execution_failed",
+            service="unison-orchestrator",
+            event_id=event_id,
+            skill_id=candidate.skill_id,
+            error=str(e)
+        )
+        raise HTTPException(status_code=500, detail=f"Skill execution failed: {str(e)}")
 
     # Minimal render block response
     rendered = {
         "ok": True,
         "event_id": event_id,
+        "skill_used": candidate.skill_id,
+        "routing_strategy": candidate.strategy_used,
+        "routing_score": candidate.score,
         "blocks": [
             {"type": "text", "text": result.get("echo", {}).get("message", message)}
         ]
