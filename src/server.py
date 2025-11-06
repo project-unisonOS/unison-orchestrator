@@ -8,6 +8,16 @@ import httpx
 import json
 from typing import Any, Dict, Tuple, List, Callable, Optional
 import asyncio
+
+# M5.1: OpenTelemetry imports
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from unison_common import (
     validate_event_envelope, 
     EnvelopeValidationError,
@@ -19,11 +29,18 @@ from unison_common import (
     add_security_headers,
     get_cors_config,
     AuthError,
-    PermissionError
-    # M4 features - not yet implemented:
-    # verify_consent_grant_locally,
-    # check_grant_scope,
-    # require_consent_grant
+    PermissionError,
+    # M5.2: Consent grant verification
+    ConsentScopes,
+    verify_consent_grant,
+    check_consent_header,
+    # M5.4: Performance optimization
+    get_http_client,
+    get_auth_cache,
+    get_policy_cache,
+    get_user_rate_limiter,
+    get_endpoint_rate_limiter,
+    get_performance_monitor,
 )
 from unison_common.logging import configure_logging, log_json
 from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
@@ -38,11 +55,49 @@ import uuid
 import time
 from collections import defaultdict
 
+# M5.1: Initialize OpenTelemetry
+def setup_telemetry():
+    """Configure OpenTelemetry tracing"""
+    # Get configuration from environment
+    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318")
+    service_name = os.getenv("OTEL_SERVICE_NAME", "unison-orchestrator")
+    service_version = os.getenv("OTEL_SERVICE_VERSION", "1.0.0")
+    
+    # Create resource with service information
+    resource = Resource(attributes={
+        SERVICE_NAME: service_name,
+        SERVICE_VERSION: service_version,
+    })
+    
+    # Configure tracer provider
+    provider = TracerProvider(resource=resource)
+    
+    # Add OTLP exporter with batch processor
+    otlp_exporter = OTLPSpanExporter(
+        endpoint=f"{otlp_endpoint}/v1/traces",
+        timeout=10
+    )
+    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+    
+    # Set as global tracer provider
+    trace.set_tracer_provider(provider)
+    
+    # Instrument HTTPX for outgoing requests
+    HTTPXClientInstrumentor().instrument()
+    
+    logging.info(f"OpenTelemetry configured: {service_name} -> {otlp_endpoint}")
+
+# Initialize telemetry
+setup_telemetry()
+
 app = FastAPI(
     title="unison-orchestrator",
     description="Orchestration service for Unison platform",
     version="1.0.0"
 )
+
+# M5.1: Instrument FastAPI with OpenTelemetry
+FastAPIInstrumentor.instrument_app(app)
 
 logger = configure_logging("unison-orchestrator")
 
@@ -685,13 +740,39 @@ _HANDLERS = {
 # --- M4: Golden Path v1 - /ingest with authentication ---
 @app.post("/ingest")
 async def ingest_m4(
+    request: Request,
     body: Dict[str, Any] = Body(...),
     current_user: Dict[str, Any] = Depends(verify_token)
 ):
-    """M4 Golden Path v1: Ingest with JWT authentication.
+    """M5.2: Ingest with JWT authentication and consent verification.
     Request body example: {"intent": "echo", "payload": {"message": "hello"}}
-    Requires: Authorization header with valid JWT token
+    Requires: 
+    - Authorization header with valid JWT token
+    - X-Consent-Grant header with consent grant for ingest.write scope (optional for now)
     """
+    # M5.1: Get tracer for custom spans
+    tracer = trace.get_tracer(__name__)
+    
+    # M5.4: Rate limiting
+    user_rate_limiter = get_user_rate_limiter()
+    endpoint_rate_limiter = get_endpoint_rate_limiter()
+    
+    # Check user rate limit
+    if not user_rate_limiter.is_allowed(current_user.get("username")):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please try again later.",
+            headers={"Retry-After": "60"}
+        )
+    
+    # Check endpoint rate limit
+    if not endpoint_rate_limiter.is_allowed("/ingest"):
+        raise HTTPException(
+            status_code=429,
+            detail="Service temporarily unavailable. Please try again later.",
+            headers={"Retry-After": "60"}
+        )
+    
     _metrics["/ingest"] += 1
     
     # Track total processing time
@@ -701,10 +782,38 @@ async def ingest_m4(
     correlation_id = str(uuid.uuid4())
     trace_id = str(uuid.uuid4()).replace('-', '')[:32]
     
+    # M5.1: Add span attributes for user context
+    current_span = trace.get_current_span()
+    current_span.set_attribute("user.id", current_user.get("username"))
+    current_span.set_attribute("user.roles", ",".join(current_user.get("roles", [])))
+    current_span.set_attribute("correlation.id", correlation_id)
+    current_span.set_attribute("trace.id", trace_id)
+    
+    # M5.2: Check for consent grant (optional for backward compatibility)
+    consent_grant = None
+    try:
+        consent_grant = await check_consent_header(
+            dict(request.headers),
+            [ConsentScopes.INGEST_WRITE]
+        )
+        if consent_grant:
+            logger.info(f"Consent grant verified for user {current_user.get('username')}")
+            current_span.set_attribute("consent.verified", "true")
+            current_span.set_attribute("consent.scopes", ",".join(consent_grant.get("scopes", [])))
+    except HTTPException as e:
+        # Consent grant provided but invalid
+        logger.warning(f"Invalid consent grant: {e.detail}")
+        current_span.set_attribute("consent.verified", "false")
+        raise
+    
     # Extract intent and payload from body
     intent = body.get("intent", "")
     payload = body.get("payload", {})
     source = body.get("source", "test-client")
+    
+    # M5.1: Add intent to span
+    current_span.set_attribute("intent.type", intent)
+    current_span.set_attribute("request.source", source)
     
     # Validate required fields
     if not intent:
@@ -713,15 +822,26 @@ async def ingest_m4(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
     
-    # M4: Store ingest request event with user context
+    # M5.2: Store ingest request event with user and consent context
+    envelope_data = {
+        "intent": intent,
+        "payload": payload,
+        "source": source,
+        "user": current_user.get("username"),
+        "roles": current_user.get("roles", [])
+    }
+    
+    # Add consent context if available
+    if consent_grant:
+        envelope_data["consent"] = {
+            "subject": consent_grant.get("sub"),
+            "scopes": consent_grant.get("scopes", []),
+            "grant_id": consent_grant.get("jti"),
+            "verified": True
+        }
+    
     store_processing_envelope(
-        envelope_data={
-            "intent": intent,
-            "payload": payload,
-            "source": source,
-            "user": current_user.get("username"),
-            "roles": current_user.get("roles", [])
-        },
+        envelope_data=envelope_data,
         trace_id=trace_id,
         correlation_id=correlation_id,
         event_type="ingest_request",
@@ -752,10 +872,22 @@ async def ingest_m4(
         
         # Call echo skill handler
         try:
-            echo_result = _handler_echo({"payload": {"message": message}, "source": source})
+            # M5.1: Create custom span for skill execution
+            with tracer.start_as_current_span("skill.echo") as skill_span:
+                skill_span.set_attribute("skill.name", "echo")
+                skill_span.set_attribute("skill.message", message)
+                
+                echo_result = _handler_echo({"payload": {"message": message}, "source": source})
+                
+                skill_span.set_attribute("skill.result", "success")
             
             # Calculate total duration
             total_duration = (time.time() - start_time) * 1000
+            
+            # M5.4: Record performance metrics
+            perf_monitor = get_performance_monitor()
+            perf_monitor.record("ingest_latency_ms", total_duration)
+            perf_monitor.record("skill_execution_ms", total_duration)
             
             # M3: Store skill processing complete event
             store_processing_envelope(
@@ -801,37 +933,72 @@ async def ingest_m4(
         raise HTTPException(status_code=400, detail=f"Unsupported intent: {intent}. Only 'echo' is supported in M2.")
 
 
-# --- M4: Replay Endpoints (with authentication) ---
+# --- M5.3: Enhanced Replay Endpoints (with filtering) ---
 @app.get("/replay/traces")
-async def list_traces_m4(
+async def list_traces_m5(
     limit: int = 50,
     offset: int = 0,
+    user_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    intent: Optional[str] = None,
     current_user: Dict[str, Any] = Depends(verify_token)
 ):
-    """List all stored traces with pagination (requires authentication)"""
+    """
+    List stored traces with filtering and pagination (M5.3)
+    
+    Query parameters:
+    - limit: Maximum number of results (default: 50)
+    - offset: Offset for pagination (default: 0)
+    - user_id: Filter by user ID
+    - start_date: Filter by start date (ISO format)
+    - end_date: Filter by end date (ISO format)
+    - status: Filter by status ("success" or "error")
+    - intent: Filter by intent type
+    """
     try:
-        replay_manager = get_replay_manager()
-        # Get all trace IDs from the store
-        all_trace_ids = replay_manager.store.get_trace_ids()
+        from datetime import datetime
         
-        # Apply pagination
-        start_idx = offset
-        end_idx = offset + limit
-        paginated_ids = all_trace_ids[start_idx:end_idx]
+        replay_manager = get_replay_manager()
+        
+        # Parse date filters
+        start_dt = datetime.fromisoformat(start_date) if start_date else None
+        end_dt = datetime.fromisoformat(end_date) if end_date else None
+        
+        # Apply filters
+        filtered_ids, total_count = replay_manager.store.filter_traces(
+            user_id=user_id,
+            start_date=start_dt,
+            end_date=end_dt,
+            status=status,
+            intent=intent,
+            limit=limit,
+            offset=offset
+        )
         
         # Get summary for each trace
         traces = []
-        for trace_id in paginated_ids:
+        for trace_id in filtered_ids:
             summary = replay_manager.get_trace_summary(trace_id)
             if summary.get("found"):
                 traces.append(summary)
         
         return {
             "traces": traces,
-            "total": len(all_trace_ids),
+            "total": total_count,
             "limit": limit,
-            "offset": offset
+            "offset": offset,
+            "filters": {
+                "user_id": user_id,
+                "start_date": start_date,
+                "end_date": end_date,
+                "status": status,
+                "intent": intent
+            }
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {str(e)}")
     except Exception as e:
         logger.error(f"Error listing traces: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list traces: {str(e)}")
@@ -890,6 +1057,207 @@ async def replay_trace_m4(
     except Exception as e:
         logger.error(f"Error replaying trace: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to replay trace: {str(e)}")
+
+@app.delete("/replay/{trace_id}")
+async def delete_trace_m5(
+    trace_id: str,
+    current_user: Dict[str, Any] = Depends(require_roles(["admin", "operator"]))
+):
+    """
+    Delete a trace by ID (M5.3)
+    Requires admin or operator role
+    """
+    try:
+        replay_manager = get_replay_manager()
+        
+        # Check if trace exists
+        summary = replay_manager.get_trace_summary(trace_id)
+        if not summary.get("found", False):
+            raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
+        
+        # Delete the trace
+        success = replay_manager.store.delete_trace(trace_id)
+        
+        if success:
+            logger.info(f"Trace {trace_id} deleted by user {current_user.get('username')}")
+            return {
+                "trace_id": trace_id,
+                "status": "deleted",
+                "deleted_by": current_user.get("username"),
+                "deleted_at": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete trace")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting trace: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete trace: {str(e)}")
+
+@app.get("/replay/{trace_id}/export")
+async def export_trace_m5(
+    trace_id: str,
+    format: str = "json",
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """
+    Export a trace in JSON or CSV format (M5.3)
+    
+    Query parameters:
+    - format: Export format ("json" or "csv", default: "json")
+    """
+    from fastapi.responses import Response
+    import csv
+    from io import StringIO
+    
+    try:
+        replay_manager = get_replay_manager()
+        
+        # Check if trace exists
+        summary = replay_manager.get_trace_summary(trace_id)
+        if not summary.get("found", False):
+            raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
+        
+        # Get all events for the trace
+        envelopes = replay_manager.store.get_envelopes_by_trace(trace_id)
+        
+        if format.lower() == "csv":
+            # Export as CSV
+            output = StringIO()
+            if envelopes:
+                # Get all possible fields
+                fieldnames = [
+                    "envelope_id", "trace_id", "correlation_id", "timestamp",
+                    "event_type", "source", "user_id", "processing_time_ms",
+                    "status_code", "error_message", "intent", "payload"
+                ]
+                
+                writer = csv.DictWriter(output, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for env in envelopes:
+                    row = {
+                        "envelope_id": env.envelope_id,
+                        "trace_id": env.trace_id,
+                        "correlation_id": env.correlation_id,
+                        "timestamp": env.timestamp.isoformat(),
+                        "event_type": env.event_type,
+                        "source": env.source,
+                        "user_id": env.user_id or "",
+                        "processing_time_ms": env.processing_time_ms or "",
+                        "status_code": env.status_code or "",
+                        "error_message": env.error_message or "",
+                        "intent": env.envelope_data.get("intent", ""),
+                        "payload": json.dumps(env.envelope_data.get("payload", {}))
+                    }
+                    writer.writerow(row)
+            
+            csv_content = output.getvalue()
+            return Response(
+                content=csv_content,
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=trace_{trace_id}.csv"
+                }
+            )
+        else:
+            # Export as JSON (default)
+            events = [env.to_dict() for env in envelopes]
+            export_data = {
+                "trace_id": trace_id,
+                "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime()),
+                "exported_by": current_user.get("username"),
+                "events_count": len(events),
+                "events": events,
+                "summary": summary
+            }
+            
+            return Response(
+                content=json.dumps(export_data, indent=2),
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename=trace_{trace_id}.json"
+                }
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting trace: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to export trace: {str(e)}")
+
+@app.get("/replay/statistics")
+async def get_replay_statistics_m5(
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """
+    Get replay system statistics (M5.3)
+    
+    Returns statistics about stored traces and events
+    """
+    try:
+        replay_manager = get_replay_manager()
+        stats = replay_manager.store.get_statistics()
+        
+        # Add per-user statistics if admin
+        user_roles = current_user.get("roles", [])
+        if "admin" in user_roles:
+            # Count traces per user
+            user_counts = {}
+            for trace_id in replay_manager.store.get_trace_ids():
+                envelopes = replay_manager.store.get_envelopes_by_trace(trace_id)
+                if envelopes and envelopes[0].user_id:
+                    user_id = envelopes[0].user_id
+                    user_counts[user_id] = user_counts.get(user_id, 0) + 1
+            
+            stats["traces_by_user"] = user_counts
+        
+        return {
+            "statistics": stats,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting statistics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
+
+@app.get("/performance/metrics")
+async def get_performance_metrics_m5(
+    current_user: Dict[str, Any] = Depends(require_roles(["admin", "operator"]))
+):
+    """
+    Get performance metrics (M5.4)
+    Requires admin or operator role
+    
+    Returns:
+    - Latency statistics (p50, p95, p99)
+    - Cache hit rates
+    - Rate limit statistics
+    """
+    try:
+        perf_monitor = get_performance_monitor()
+        auth_cache = get_auth_cache()
+        policy_cache = get_policy_cache()
+        user_rate_limiter = get_user_rate_limiter()
+        
+        return {
+            "latency": perf_monitor.get_all_stats(),
+            "caches": {
+                "auth": auth_cache.get_stats(),
+                "policy": policy_cache.get_stats()
+            },
+            "rate_limiting": {
+                "user_limiter": {
+                    "rate": user_rate_limiter.rate,
+                    "per_seconds": user_rate_limiter.per
+                }
+            },
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
+        }
+    except Exception as e:
+        logger.error(f"Error getting performance metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get performance metrics: {str(e)}")
 
 
 if __name__ == "__main__":
