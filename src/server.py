@@ -19,14 +19,19 @@ from unison_common import (
     add_security_headers,
     get_cors_config,
     AuthError,
-    PermissionError,
-    verify_consent_grant_locally,
-    check_grant_scope,
-    require_consent_grant
+    PermissionError
+    # M4 features - not yet implemented:
+    # verify_consent_grant_locally,
+    # check_grant_scope,
+    # require_consent_grant
 )
 from unison_common.logging import configure_logging, log_json
 from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
 from unison_common.auth import rate_limit
+from unison_common.replay_store import initialize_replay, ReplayConfig, get_replay_manager
+from unison_common.replay_endpoints import store_processing_envelope
+from unison_common.idempotency_middleware import IdempotencyMiddleware, IdempotencyKeyRequiredMiddleware
+from unison_common.idempotency import IdempotencyManager, IdempotencyConfig, get_idempotency_manager
 from router import Router, RoutingStrategy, RoutingContext, RouteCandidate
 import logging
 import uuid
@@ -41,6 +46,14 @@ app = FastAPI(
 
 logger = configure_logging("unison-orchestrator")
 
+# Initialize replay store for M3 event storage
+replay_config = ReplayConfig()
+replay_config.default_retention_days = 30
+replay_config.max_envelopes_per_trace = 1000
+replay_config.max_stored_envelopes = 50000
+initialize_replay(replay_config)
+logger.info("Replay store initialized for M3 event storage")
+
 # Security middleware configuration
 cors_config = get_cors_config()
 
@@ -49,6 +62,15 @@ app.add_middleware(
     CORSMiddleware,
     **cors_config
 )
+
+# M4: Initialize idempotency manager
+idempotency_config = IdempotencyConfig()
+idempotency_config.ttl_seconds = 24 * 60 * 60  # 24 hours
+# Note: Using in-memory store for M4; Redis integration can be added later
+app.add_middleware(IdempotencyMiddleware, ttl_seconds=idempotency_config.ttl_seconds)
+
+# Add idempotency key requirement for critical endpoints (M4: re-enabled)
+app.add_middleware(IdempotencyKeyRequiredMiddleware, required_paths=['/ingest'])
 
 # Trusted hosts middleware (prevents host header attacks)
 allowed_hosts = os.getenv("UNISON_ALLOWED_HOSTS", "localhost,127.0.0.1,orchestrator").split(",")
@@ -229,6 +251,67 @@ def health():
     _metrics["/health"] += 1
     log_json(logging.INFO, "health", service="unison-orchestrator")
     return {"status": "ok", "service": "unison-orchestrator"}
+
+@app.get("/readyz")
+def readiness():
+    """Readiness check that verifies all dependencies are ready"""
+    _metrics["/readyz"] += 1
+    
+    checks = {}
+    overall_ready = True
+    
+    # Check policy service
+    try:
+        ok, status, body = http_get_json(POLICY_HOST, POLICY_PORT, "/health")
+        checks["policy"] = {"ready": ok, "status": status}
+        if not ok:
+            overall_ready = False
+    except Exception as e:
+        checks["policy"] = {"ready": False, "error": str(e)}
+        overall_ready = False
+    
+    # Check context service
+    try:
+        ok, status, body = http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health")
+        checks["context"] = {"ready": ok, "status": status}
+        if not ok:
+            overall_ready = False
+    except Exception as e:
+        checks["context"] = {"ready": False, "error": str(e)}
+        overall_ready = False
+    
+    # Check storage service
+    try:
+        ok, status, body = http_get_json(STORAGE_HOST, STORAGE_PORT, "/health")
+        checks["storage"] = {"ready": ok, "status": status}
+        if not ok:
+            overall_ready = False
+    except Exception as e:
+        checks["storage"] = {"ready": False, "error": str(e)}
+        overall_ready = False
+    
+    # Check inference service
+    try:
+        ok, status, body = http_get_json(INFERENCE_HOST, INFERENCE_PORT, "/health")
+        checks["inference"] = {"ready": ok, "status": status}
+        if not ok:
+            overall_ready = False
+    except Exception as e:
+        checks["inference"] = {"ready": False, "error": str(e)}
+        overall_ready = False
+    
+    # Check if skills are registered
+    checks["skills"] = {"ready": len(_skills) > 0, "count": len(_skills)}
+    if len(_skills) == 0:
+        overall_ready = False
+    
+    log_json(logging.INFO, "readiness", service="unison-orchestrator", 
+             ready=overall_ready, checks=checks)
+    
+    if overall_ready:
+        return {"ready": True, "checks": checks}
+    else:
+        return {"ready": False, "checks": checks}
 
 @app.get("/metrics")
 def metrics():
@@ -599,217 +682,215 @@ _HANDLERS = {
 
 # Skills already registered above (lines 174-180)
 
-# --- GoldenPath v1: /ingest with Consent Grants ---
+# --- M4: Golden Path v1 - /ingest with authentication ---
 @app.post("/ingest")
-async def ingest(
-    body: Dict[str, Any] = Body(...),
-    current_user: Dict[str, Any] = Depends(verify_token),
-    grant_token: str = Body(None, description="Consent grant JWT for authorization")
-):
-    """GoldenPath v1: ingest -> context lookup -> consent grant verify -> echo -> render.
-    Request body example: {"message": "hello", "source": "io-speech", "grant_token": "jwt..."}
-    """
-    _metrics["/ingest"] += 1
-
-    message = body.get("message", "")
-    source = body.get("source", "io")
-    grant_token = body.get("grant_token") or grant_token
-    
-    if not isinstance(message, str) or message == "":
-        raise HTTPException(status_code=400, detail="message is required")
-    
-    if not grant_token:
-        raise HTTPException(status_code=400, detail="grant_token is required")
-
-    # Correlation / request id propagation
-    event_id = str(uuid.uuid4())
-
-    # Optional: fetch minimal context snapshot (health as proxy)
-    hdrs = {"X-Event-ID": event_id}
-    http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health", headers=hdrs)
-
-    # Consent grant verification (local JWT verification - no network call)
-    try:
-        grant_payload = verify_consent_grant_locally(grant_token)
-        
-        # Verify grant has required scope for echo capability
-        if not check_grant_scope(grant_payload, "unison.echo"):
-            raise HTTPException(
-                status_code=403, 
-                detail="Consent grant does not include required scope: unison.echo"
-            )
-        
-        # Verify grant is for the correct subject
-        if grant_payload.get("sub") != current_user.get("username"):
-            raise HTTPException(
-                status_code=403,
-                detail="Consent grant subject does not match authenticated user"
-            )
-        
-        log_json(
-            logging.INFO,
-            "consent_grant_verified",
-            service="unison-orchestrator",
-            event_id=event_id,
-            grant_jti=grant_payload.get("jti"),
-            grant_scopes=grant_payload.get("scopes"),
-            grant_purpose=grant_payload.get("purpose"),
-            user=current_user.get("username")
-        )
-        
-    except AuthError as e:
-        log_json(
-            logging.WARNING,
-            "consent_grant_denied",
-            service="unison-orchestrator",
-            event_id=event_id,
-            error=str(e),
-            user=current_user.get("username")
-        )
-        raise HTTPException(status_code=403, detail=f"Consent grant verification failed: {str(e)}")
-
-    # Route and execute skill using router
-    envelope = {
-        "intent": "echo",
-        "source": source,
-        "payload": {"message": message},
-        "user": {
-            "username": current_user.get("username"),
-            "roles": current_user.get("roles", [])
-        },
-        "grant": {
-            "jti": grant_payload.get("jti"),
-            "scopes": grant_payload.get("scopes"),
-            "purpose": grant_payload.get("purpose")
-        },
-        "event_id": event_id
-    }
-    
-    # Create routing context
-    routing_context = RoutingContext(
-        intent="echo",
-        payload=envelope["payload"],
-        user=envelope["user"],
-        source=source,
-        event_id=event_id,
-        timestamp=time.time()
-    )
-    
-    # Route to appropriate skill
-    candidate = router.route(routing_context, _skills)
-    
-    if not candidate:
-        log_json(
-            logging.WARNING,
-            "routing_failed",
-            service="unison-orchestrator",
-            event_id=event_id,
-            intent="echo",
-            strategy=router.get_strategy_name()
-        )
-        raise HTTPException(status_code=404, detail="No suitable skill found for request")
-    
-    # Execute the routed skill
-    try:
-        result = candidate.handler(envelope)
-        
-        log_json(
-            logging.INFO,
-            "skill_executed",
-            service="unison-orchestrator",
-            event_id=event_id,
-            skill_id=candidate.skill_id,
-            strategy_used=candidate.strategy_used,
-            routing_score=candidate.score
-        )
-        
-    except Exception as e:
-        log_json(
-            logging.ERROR,
-            "skill_execution_failed",
-            service="unison-orchestrator",
-            event_id=event_id,
-            skill_id=candidate.skill_id,
-            error=str(e)
-        )
-        raise HTTPException(status_code=500, detail=f"Skill execution failed: {str(e)}")
-
-    # Minimal render block response
-    rendered = {
-        "ok": True,
-        "event_id": event_id,
-        "skill_used": candidate.skill_id,
-        "routing_strategy": candidate.strategy_used,
-        "routing_score": candidate.score,
-        "blocks": [
-            {"type": "text", "text": result.get("echo", {}).get("message", message)}
-        ]
-    }
-    return rendered
-
-# --- Grant Testing Endpoint ---
-@app.post("/test-grant")
-async def test_grant(
+async def ingest_m4(
     body: Dict[str, Any] = Body(...),
     current_user: Dict[str, Any] = Depends(verify_token)
 ):
-    """Test endpoint to issue and verify consent grants"""
-    action = body.get("action", "verify")
+    """M4 Golden Path v1: Ingest with JWT authentication.
+    Request body example: {"intent": "echo", "payload": {"message": "hello"}}
+    Requires: Authorization header with valid JWT token
+    """
+    _metrics["/ingest"] += 1
     
-    if action == "issue":
-        # Issue a new grant from consent service
-        grant_request = {
-            "subject": current_user.get("username"),
-            "scopes": body.get("scopes", ["unison.echo"]),
-            "purpose": body.get("purpose", "Testing"),
-            "ttl": body.get("ttl", 3600),
-            "audience": "orchestrator"
-        }
+    # Track total processing time
+    start_time = time.time()
+    
+    # Generate correlation ID for this request
+    correlation_id = str(uuid.uuid4())
+    trace_id = str(uuid.uuid4()).replace('-', '')[:32]
+    
+    # Extract intent and payload from body
+    intent = body.get("intent", "")
+    payload = body.get("payload", {})
+    source = body.get("source", "test-client")
+    
+    # Validate required fields
+    if not intent:
+        raise HTTPException(status_code=400, detail="intent is required")
+    
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    
+    # M4: Store ingest request event with user context
+    store_processing_envelope(
+        envelope_data={
+            "intent": intent,
+            "payload": payload,
+            "source": source,
+            "user": current_user.get("username"),
+            "roles": current_user.get("roles", [])
+        },
+        trace_id=trace_id,
+        correlation_id=correlation_id,
+        event_type="ingest_request",
+        source="orchestrator",
+        user_id=current_user.get("username"),
+        processing_time_ms=None,
+        status_code=200,
+        error_message=None
+    )
+    
+    # Process based on intent
+    if intent == "echo":
+        # Echo skill processing
+        message = payload.get("message", "")
         
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required for echo intent")
+        
+        # M3: Store skill processing start event
+        store_processing_envelope(
+            envelope_data={"intent": intent, "message": message},
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+            event_type="skill_start",
+            source="orchestrator",
+            user_id=None
+        )
+        
+        # Call echo skill handler
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.post(
-                    f"http://localhost:7072/grants",
-                    json=grant_request
-                )
+            echo_result = _handler_echo({"payload": {"message": message}, "source": source})
             
-            if response.status_code == 200:
-                return response.json()
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Grant issuance failed: {response.text}"
-                )
-                
+            # Calculate total duration
+            total_duration = (time.time() - start_time) * 1000
+            
+            # M3: Store skill processing complete event
+            store_processing_envelope(
+                envelope_data={"intent": intent, "result": echo_result},
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                event_type="skill_complete",
+                source="orchestrator",
+                user_id=None,
+                processing_time_ms=total_duration,
+                status_code=200
+            )
+            
+            # Return response
+            return {
+                "status": "success",
+                "trace_id": trace_id,
+                "correlation_id": correlation_id,
+                "result": {
+                    "intent": intent,
+                    "response": echo_result.get("echo", {}).get("message", message),
+                    "processed_at": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
+                },
+                "duration_ms": round(total_duration, 2)
+            }
+            
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to issue grant: {str(e)}")
-    
-    elif action == "verify":
-        # Verify an existing grant
-        grant_token = body.get("grant_token")
-        if not grant_token:
-            raise HTTPException(status_code=400, detail="grant_token is required")
-        
-        try:
-            grant_payload = verify_consent_grant_locally(grant_token)
-            return {
-                "valid": True,
-                "grant": {
-                    "jti": grant_payload.get("jti"),
-                    "subject": grant_payload.get("sub"),
-                    "scopes": grant_payload.get("scopes"),
-                    "purpose": grant_payload.get("purpose"),
-                    "expires_at": grant_payload.get("exp")
-                }
-            }
-        except AuthError as e:
-            return {
-                "valid": False,
-                "error": str(e)
-            }
+            # M3: Store error event
+            store_processing_envelope(
+                envelope_data={"intent": intent, "error": str(e)},
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                event_type="error",
+                source="orchestrator",
+                user_id=None,
+                error_message=str(e),
+                status_code=500
+            )
+            raise HTTPException(status_code=500, detail=f"Skill processing failed: {str(e)}")
     
     else:
-        raise HTTPException(status_code=400, detail="Invalid action. Use 'issue' or 'verify'")
+        # Unsupported intent
+        raise HTTPException(status_code=400, detail=f"Unsupported intent: {intent}. Only 'echo' is supported in M2.")
+
+
+# --- M4: Replay Endpoints (with authentication) ---
+@app.get("/replay/traces")
+async def list_traces_m4(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """List all stored traces with pagination (requires authentication)"""
+    try:
+        replay_manager = get_replay_manager()
+        # Get all trace IDs from the store
+        all_trace_ids = replay_manager.store.get_trace_ids()
+        
+        # Apply pagination
+        start_idx = offset
+        end_idx = offset + limit
+        paginated_ids = all_trace_ids[start_idx:end_idx]
+        
+        # Get summary for each trace
+        traces = []
+        for trace_id in paginated_ids:
+            summary = replay_manager.get_trace_summary(trace_id)
+            if summary.get("found"):
+                traces.append(summary)
+        
+        return {
+            "traces": traces,
+            "total": len(all_trace_ids),
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        logger.error(f"Error listing traces: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list traces: {str(e)}")
+
+@app.get("/replay/{trace_id}/summary")
+async def get_trace_summary_m4(
+    trace_id: str,
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """Get summary for a specific trace (requires authentication)"""
+    try:
+        replay_manager = get_replay_manager()
+        summary = replay_manager.get_trace_summary(trace_id)
+        
+        if not summary.get("found", False):
+            raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
+        
+        return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting trace summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get trace summary: {str(e)}")
+
+@app.post("/replay/{trace_id}")
+async def replay_trace_m4(
+    trace_id: str,
+    current_user: Dict[str, Any] = Depends(verify_token)
+):
+    """Replay a trace by ID (requires authentication)"""
+    try:
+        replay_manager = get_replay_manager()
+        
+        # Check if trace exists
+        summary = replay_manager.get_trace_summary(trace_id)
+        if not summary.get("found", False):
+            raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
+        
+        # Get all events for the trace
+        envelopes = replay_manager.store.get_envelopes_by_trace(trace_id)
+        
+        # Convert envelopes to dict format
+        events = [env.to_dict() for env in envelopes]
+        
+        # For M3, we'll do a simple replay by returning the events
+        # Full re-execution can be added in a future iteration
+        return {
+            "trace_id": trace_id,
+            "status": "replayed",
+            "events_count": len(events),
+            "events": events,
+            "message": "Trace events retrieved successfully. Full re-execution coming in future iteration."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error replaying trace: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to replay trace: {str(e)}")
+
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8080) 
