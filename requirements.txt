@@ -12,4 +12,6 @@ opentelemetry-exporter-jaeger==1.21.0
 opentelemetry-exporter-otlp==1.21.0
 opentelemetry-propagator-b3==1.21.0
 opentelemetry-propagator-jaeger==1.21.0
-# during local dev, install unison-common with `pip install -e ../unison-common`
+
+# unison-common package (local install)
+../unison-common/dist/unison_common-0.1.0-py3-none-any.whl

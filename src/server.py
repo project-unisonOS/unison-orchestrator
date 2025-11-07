@@ -41,6 +41,10 @@ from unison_common import (
     get_user_rate_limiter,
     get_endpoint_rate_limiter,
     get_performance_monitor,
+    # P0.3: Tracing middleware
+    TracingMiddleware,
+    get_request_id,
+    create_tracing_client,
 )
 from unison_common.logging import configure_logging, log_json
 from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
@@ -117,6 +121,10 @@ app.add_middleware(
     CORSMiddleware,
     **cors_config
 )
+
+# P0.3: Add tracing middleware for x-request-id and traceparent propagation
+app.add_middleware(TracingMiddleware, service_name="unison-orchestrator")
+logger.info("P0.3: Tracing middleware enabled")
 
 # M4: Initialize idempotency manager
 idempotency_config = IdempotencyConfig()
