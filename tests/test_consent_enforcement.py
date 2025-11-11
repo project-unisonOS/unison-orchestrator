@@ -30,6 +30,8 @@ def make_consent_app():
 
 def test_orchestrator_ingest_requires_consent(monkeypatch):
     monkeypatch.setenv("UNISON_REQUIRE_CONSENT", "true")
+    # Allow TestClient host through TrustedHostMiddleware
+    monkeypatch.setenv("UNISON_ALLOWED_HOSTS", "testserver,localhost,127.0.0.1,orchestrator")
     # Route consent introspection to the in-test ASGI app
     monkeypatch.setenv("UNISON_CONSENT_HOST", "testserver")
     monkeypatch.setenv("UNISON_CONSENT_PORT", "80")
