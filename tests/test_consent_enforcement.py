@@ -56,11 +56,18 @@ def test_orchestrator_ingest_requires_consent(monkeypatch):
 
     payload = {"intent": "echo", "payload": {"message": "hi"}}
 
-    # No consent provided -> should be 403
-    r_forbidden = client.post("/ingest", json=payload, headers={"Authorization": "Bearer any"})
+    # No consent provided -> should be 403 (Authorization is dummy for auth, no X-Consent-Grant)
+    r_forbidden = client.post("/ingest", json=payload, headers={"Authorization": "Bearer dummy"})
     assert r_forbidden.status_code == 403
 
-    # Provide consent via Authorization for simplicity (AsyncClient patched to introspect)
-    r_ok = client.post("/ingest", json=payload, headers={"Authorization": "Bearer valid-write"})
+    # Provide consent via X-Consent-Grant so it doesn't conflict with auth token
+    r_ok = client.post(
+        "/ingest",
+        json=payload,
+        headers={
+            "Authorization": "Bearer dummy",
+            "X-Consent-Grant": "valid-write",
+        },
+    )
     # Allow 403/401 if other auth requirements exist; we just ensure consent isn't the blocker.
     assert r_ok.status_code in (200, 401, 403)
