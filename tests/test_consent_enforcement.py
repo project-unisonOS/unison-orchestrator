@@ -4,7 +4,7 @@ from fastapi import Request
 import httpx
 
 from unison_common.consent import ConsentScopes, clear_consent_cache
-import os, sys
+import os, sys, time
 
 
 def make_consent_app():
@@ -54,7 +54,12 @@ def test_orchestrator_ingest_requires_consent(monkeypatch):
     orch_app.dependency_overrides[server.verify_token] = lambda: {"username": "test", "roles": ["user"]}
     client = TestClient(orch_app)
 
-    payload = {"intent": "echo", "payload": {"message": "hi"}}
+    payload = {
+        "timestamp": int(time.time()),
+        "source": "test-client",
+        "intent": "echo",
+        "payload": {"message": "hi"},
+    }
 
     # No consent provided -> should be 403 (Authorization is dummy for auth, no X-Consent-Grant)
     r_forbidden = client.post(
