@@ -53,6 +53,7 @@ from unison_common.replay_store import initialize_replay, ReplayConfig, get_repl
 from unison_common.replay_endpoints import store_processing_envelope
 from unison_common.idempotency_middleware import IdempotencyMiddleware, IdempotencyKeyRequiredMiddleware
 from unison_common.idempotency import IdempotencyManager, IdempotencyConfig, get_idempotency_manager
+from unison_common.consent import require_consent, ConsentScopes
 from router import Router, RoutingStrategy, RoutingContext, RouteCandidate
 import logging
 import uuid
@@ -746,11 +747,14 @@ _HANDLERS = {
 # Skills already registered above (lines 174-180)
 
 # --- M4: Golden Path v1 - /ingest with authentication ---
+REQUIRE_CONSENT = os.getenv("UNISON_REQUIRE_CONSENT", "false").lower() == "true"
+
 @app.post("/ingest")
 async def ingest_m4(
     request: Request,
     body: Dict[str, Any] = Body(...),
-    current_user: Dict[str, Any] = Depends(verify_token)
+    current_user: Dict[str, Any] = Depends(verify_token),
+    consent_grant: Dict[str, Any] = Depends(require_consent([ConsentScopes.INGEST_WRITE])) if REQUIRE_CONSENT else None,
 ):
     """M5.2: Ingest with JWT authentication and consent verification.
     Request body example: {"intent": "echo", "payload": {"message": "hello"}}
@@ -797,22 +801,11 @@ async def ingest_m4(
     current_span.set_attribute("correlation.id", correlation_id)
     current_span.set_attribute("trace.id", trace_id)
     
-    # M5.2: Check for consent grant (optional for backward compatibility)
-    consent_grant = None
-    try:
-        consent_grant = await check_consent_header(
-            dict(request.headers),
-            [ConsentScopes.INGEST_WRITE]
-        )
-        if consent_grant:
-            logger.info(f"Consent grant verified for user {current_user.get('username')}")
-            current_span.set_attribute("consent.verified", "true")
-            current_span.set_attribute("consent.scopes", ",".join(consent_grant.get("scopes", [])))
-    except HTTPException as e:
-        # Consent grant provided but invalid
-        logger.warning(f"Invalid consent grant: {e.detail}")
-        current_span.set_attribute("consent.verified", "false")
-        raise
+    # M5.2: Consent grant (feature-flagged)
+    if REQUIRE_CONSENT and consent_grant is not None:
+        logger.info(f"Consent grant verified for user {current_user.get('username')}")
+        current_span.set_attribute("consent.verified", "true")
+        current_span.set_attribute("consent.scopes", ",".join(consent_grant.get("scopes", [])))
     
     # Extract intent and payload from body
     intent = body.get("intent", "")
@@ -840,12 +833,12 @@ async def ingest_m4(
     }
     
     # Add consent context if available
-    if consent_grant:
+    if REQUIRE_CONSENT and consent_grant is not None:
         envelope_data["consent"] = {
             "subject": consent_grant.get("sub"),
             "scopes": consent_grant.get("scopes", []),
             "grant_id": consent_grant.get("jti"),
-            "verified": True
+            "verified": True,
         }
     
     store_processing_envelope(
