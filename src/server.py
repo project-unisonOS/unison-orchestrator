@@ -54,7 +54,7 @@ from unison_common.replay_endpoints import store_processing_envelope
 from unison_common.idempotency_middleware import IdempotencyMiddleware, IdempotencyKeyRequiredMiddleware
 from unison_common.idempotency import IdempotencyManager, IdempotencyConfig, get_idempotency_manager
 from unison_common.consent import require_consent, ConsentScopes
-from router import Router, RoutingStrategy, RoutingContext, RouteCandidate
+from src.router import Router, RoutingStrategy, RoutingContext, RouteCandidate
 import logging
 import uuid
 import time
