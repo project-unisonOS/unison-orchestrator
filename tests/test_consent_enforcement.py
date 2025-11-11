@@ -57,7 +57,14 @@ def test_orchestrator_ingest_requires_consent(monkeypatch):
     payload = {"intent": "echo", "payload": {"message": "hi"}}
 
     # No consent provided -> should be 403 (Authorization is dummy for auth, no X-Consent-Grant)
-    r_forbidden = client.post("/ingest", json=payload, headers={"Authorization": "Bearer dummy"})
+    r_forbidden = client.post(
+        "/ingest",
+        json=payload,
+        headers={
+            "Authorization": "Bearer dummy",
+            "Idempotency-Key": "test-key-1",
+        },
+    )
     assert r_forbidden.status_code == 403
 
     # Provide consent via X-Consent-Grant so it doesn't conflict with auth token
@@ -67,6 +74,7 @@ def test_orchestrator_ingest_requires_consent(monkeypatch):
         headers={
             "Authorization": "Bearer dummy",
             "X-Consent-Grant": "valid-write",
+            "Idempotency-Key": "test-key-2",
         },
     )
     # Allow 403/401 if other auth requirements exist; we just ensure consent isn't the blocker.
