@@ -6,7 +6,7 @@ import pytest
 import time
 import uuid
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch, AsyncMock
 
 from unison_common.replay_store import (
@@ -60,7 +60,7 @@ class TestStoredEnvelope:
     
     def test_envelope_creation(self):
         """Test creating a stored envelope"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         envelope = StoredEnvelope(
             envelope_id="test-envelope-id",
@@ -86,7 +86,7 @@ class TestStoredEnvelope:
     
     def test_envelope_serialization(self):
         """Test envelope to/from dictionary conversion"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         envelope = StoredEnvelope(
             envelope_id="test-envelope-id",
@@ -116,7 +116,7 @@ class TestReplaySession:
     
     def test_session_creation(self):
         """Test creating a replay session"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         session = ReplaySession(
             session_id="test-session-id",
@@ -141,7 +141,7 @@ class TestReplaySession:
     
     def test_session_serialization(self):
         """Test session to/from dictionary conversion"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         session = ReplaySession(
             session_id="test-session-id",
@@ -180,7 +180,7 @@ class TestMemoryReplayStore:
     
     def test_store_and_retrieve_envelope(self, store):
         """Test storing and retrieving envelopes"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         envelope = StoredEnvelope(
             envelope_id="test-envelope-id",
@@ -203,7 +203,7 @@ class TestMemoryReplayStore:
     
     def test_get_envelopes_by_correlation(self, store):
         """Test getting envelopes by correlation ID"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         # Store envelopes with same correlation ID
         envelope1 = StoredEnvelope(
@@ -237,7 +237,7 @@ class TestMemoryReplayStore:
     
     def test_create_replay_session(self, store):
         """Test creating replay sessions"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         # Store some envelopes
         envelope = StoredEnvelope(
@@ -283,7 +283,7 @@ class TestMemoryReplayStore:
     
     def test_delete_trace(self, store):
         """Test deleting traces"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         envelope = StoredEnvelope(
             envelope_id="test-envelope-id",
@@ -308,7 +308,7 @@ class TestMemoryReplayStore:
     def test_get_statistics(self, store):
         """Test getting store statistics"""
         # Store some test data
-        now = datetime.utcnow()
+        now = now_utc()
         
         envelope1 = StoredEnvelope(
             envelope_id="envelope-1",
@@ -425,7 +425,7 @@ class TestReplayManager:
     
     def test_get_trace_summary(self, manager):
         """Test getting trace summary"""
-        now = datetime.utcnow()
+        now = now_utc()
         
         # Store test envelopes
         manager.store_event_envelope(
@@ -698,3 +698,5 @@ class TestStoreProcessingEnvelope:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+def now_utc():
+    return datetime.now(timezone.utc)

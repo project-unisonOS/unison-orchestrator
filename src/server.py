@@ -1,98 +1,51 @@
-from fastapi import FastAPI, HTTPException, Body, Request, Depends
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPBearer
-import uvicorn
-import os
-import httpx
-import json
-from typing import Any, Dict, Tuple, List, Callable, Optional
 import asyncio
+import json
+import logging
+import time
+import uvicorn
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# M5.1: OpenTelemetry imports
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+from orchestrator import OrchestratorSettings, ServiceClients, instrument_fastapi, setup_telemetry
+from orchestrator.api import register_event_routes
+from orchestrator.services import (
+    evaluate_capability,
+    fetch_core_health,
+    fetch_policy_rules,
+    readiness_allowed,
+)
 from unison_common import (
-    validate_event_envelope, 
-    EnvelopeValidationError,
-    verify_token,
-    verify_service_token,
-    require_roles,
-    require_role,
-    get_security_context,
-    add_security_headers,
-    get_cors_config,
     AuthError,
     PermissionError,
-    # M5.2: Consent grant verification
-    ConsentScopes,
-    verify_consent_grant,
-    check_consent_header,
-    # M5.4: Performance optimization
-    get_http_client,
-    get_auth_cache,
-    get_policy_cache,
-    get_user_rate_limiter,
-    get_endpoint_rate_limiter,
-    get_performance_monitor,
-    # P0.3: Tracing middleware
     TracingMiddleware,
+    add_security_headers,
+    get_auth_cache,
+    get_cors_config,
+    get_performance_monitor,
+    get_policy_cache,
     get_request_id,
-    create_tracing_client,
+    get_user_rate_limiter,
+    require_role,
+    require_roles,
+    verify_consent_grant,
+    verify_service_token,
+    verify_token,
 )
-from unison_common.logging import configure_logging, log_json
-from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
 from unison_common.auth import rate_limit
-from unison_common.replay_store import initialize_replay, ReplayConfig, get_replay_manager
-from unison_common.replay_endpoints import store_processing_envelope
-from unison_common.idempotency_middleware import IdempotencyMiddleware, IdempotencyKeyRequiredMiddleware
-from unison_common.idempotency import IdempotencyManager, IdempotencyConfig, get_idempotency_manager
-from unison_common.consent import require_consent, ConsentScopes
-from router import Router, RoutingStrategy, RoutingContext, RouteCandidate
-import logging
+from unison_common.idempotency import IdempotencyConfig, IdempotencyManager, get_idempotency_manager
+from unison_common.idempotency_middleware import IdempotencyKeyRequiredMiddleware, IdempotencyMiddleware
+from unison_common.logging import configure_logging, log_json
+from unison_common.replay_store import ReplayConfig, get_replay_manager, initialize_replay
+from router import RouteCandidate, Router, RoutingContext, RoutingStrategy
 import uuid
-import time
 from collections import defaultdict
 
-# M5.1: Initialize OpenTelemetry
-def setup_telemetry():
-    """Configure OpenTelemetry tracing"""
-    # Get configuration from environment
-    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318")
-    service_name = os.getenv("OTEL_SERVICE_NAME", "unison-orchestrator")
-    service_version = os.getenv("OTEL_SERVICE_VERSION", "1.0.0")
-    
-    # Create resource with service information
-    resource = Resource(attributes={
-        SERVICE_NAME: service_name,
-        SERVICE_VERSION: service_version,
-    })
-    
-    # Configure tracer provider
-    provider = TracerProvider(resource=resource)
-    
-    # Add OTLP exporter with batch processor
-    otlp_exporter = OTLPSpanExporter(
-        endpoint=f"{otlp_endpoint}/v1/traces",
-        timeout=10
-    )
-    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-    
-    # Set as global tracer provider
-    trace.set_tracer_provider(provider)
-    
-    # Instrument HTTPX for outgoing requests
-    HTTPXClientInstrumentor().instrument()
-    
-    logging.info(f"OpenTelemetry configured: {service_name} -> {otlp_endpoint}")
-
-# Initialize telemetry
+# Initialize telemetry before the app boots
 setup_telemetry()
 
 app = FastAPI(
@@ -102,9 +55,22 @@ app = FastAPI(
 )
 
 # M5.1: Instrument FastAPI with OpenTelemetry
-FastAPIInstrumentor.instrument_app(app)
+instrument_fastapi(app)
 
 logger = configure_logging("unison-orchestrator")
+settings = OrchestratorSettings.from_env()
+endpoints = settings.endpoints
+service_clients = ServiceClients.from_endpoints(endpoints)
+CONTEXT_HOST = endpoints.context_host
+CONTEXT_PORT = endpoints.context_port
+STORAGE_HOST = endpoints.storage_host
+STORAGE_PORT = endpoints.storage_port
+POLICY_HOST = endpoints.policy_host
+POLICY_PORT = endpoints.policy_port
+INFERENCE_HOST = endpoints.inference_host
+INFERENCE_PORT = endpoints.inference_port
+CONFIRM_TTL_SECONDS = settings.confirm_ttl_seconds
+REQUIRE_CONSENT = settings.require_consent
 
 # Initialize replay store for M3 event storage
 replay_config = ReplayConfig()
@@ -137,10 +103,9 @@ app.add_middleware(IdempotencyMiddleware, ttl_seconds=idempotency_config.ttl_sec
 app.add_middleware(IdempotencyKeyRequiredMiddleware, required_paths=['/ingest'])
 
 # Trusted hosts middleware (prevents host header attacks)
-allowed_hosts = os.getenv("UNISON_ALLOWED_HOSTS", "localhost,127.0.0.1,orchestrator").split(",")
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=allowed_hosts
+    allowed_hosts=settings.allowed_hosts
 )
 
 # Security headers middleware
@@ -166,27 +131,7 @@ _metrics = defaultdict(int)
 _start_time = time.time()
 
 # Router configuration
-ROUTING_STRATEGY = os.getenv("UNISON_ROUTING_STRATEGY", "rule_based")
-router = Router(RoutingStrategy(ROUTING_STRATEGY))
-
-CONTEXT_HOST = os.getenv("UNISON_CONTEXT_HOST", "context")
-CONTEXT_PORT = os.getenv("UNISON_CONTEXT_PORT", "8081")
-STORAGE_HOST = os.getenv("UNISON_STORAGE_HOST", "storage")
-STORAGE_PORT = os.getenv("UNISON_STORAGE_PORT", "8082")
-POLICY_HOST = os.getenv("UNISON_POLICY_HOST", "policy")
-POLICY_PORT = os.getenv("UNISON_POLICY_PORT", "8083")
-INFERENCE_HOST = os.getenv("UNISON_INFERENCE_HOST", "inference")
-INFERENCE_PORT = os.getenv("UNISON_INFERENCE_PORT", "8087")
-CONFIRM_TTL_SECONDS = int(os.getenv("UNISON_CONFIRM_TTL", "300"))
-
-def http_get_json(host: str, port: str, path: str, headers: Dict[str, str] | None = None) -> Tuple[bool, int, dict | None]:
-    return http_get_json_with_retry(host, port, path, headers=headers, max_retries=3, base_delay=0.1, max_delay=2.0, timeout=2.0)
-
-def http_post_json(host: str, port: str, path: str, payload: dict, headers: Dict[str, str] | None = None) -> Tuple[bool, int, dict | None]:
-    return http_post_json_with_retry(host, port, path, payload, headers=headers, max_retries=3, base_delay=0.1, max_delay=2.0, timeout=2.0)
-
-def http_put_json(host: str, port: str, path: str, payload: dict, headers: Dict[str, str] | None = None) -> Tuple[bool, int, dict | None]:
-    return http_put_json_with_retry(host, port, path, payload, headers=headers, max_retries=3, base_delay=0.1, max_delay=2.0, timeout=2.0)
+router = Router(RoutingStrategy(settings.routing_strategy))
 
 # --- ORCH-001: Skill/Intent registry (in-memory) ---
 Skill = Dict[str, Any]
@@ -221,9 +166,10 @@ def _handler_inference(envelope: Dict[str, Any]) -> Dict[str, Any]:
         "temperature": temperature
     }
     
-    ok, status, body = http_post_json(
-        INFERENCE_HOST, INFERENCE_PORT, "/inference/request", inference_payload,
-        headers={"X-Event-ID": event_id}
+    ok, status, body = service_clients.inference.post(
+        "/inference/request",
+        inference_payload,
+        headers={"X-Event-ID": event_id},
     )
     
     if ok and body:
@@ -246,7 +192,7 @@ def _handler_context_get(envelope: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(keys, list):
         raise ValueError("context.get requires 'keys' list in payload")
     # Call Context service KV GET
-    ok, status, body = http_post_json(CONTEXT_HOST, CONTEXT_PORT, "/kv/get", {"keys": keys})
+    ok, status, body = service_clients.context.post("/kv/get", {"keys": keys})
     if not ok or not isinstance(body, dict):
         raise RuntimeError(f"Context service error: {status}")
     return body
@@ -260,7 +206,7 @@ def _handler_storage_put(envelope: Dict[str, Any]) -> Dict[str, Any]:
     if value is None:
         raise ValueError("storage.put requires 'value' in payload")
     # Call Storage service KV PUT
-    ok, status, body = http_put_json(STORAGE_HOST, STORAGE_PORT, f"/kv/{key}", {"value": value})
+    ok, status, body = service_clients.storage.put(f"/kv/{key}", {"value": value})
     if not ok or not isinstance(body, dict):
         raise RuntimeError(f"Storage service error: {status}")
     return body
@@ -326,7 +272,7 @@ def readiness():
     
     # Check policy service
     try:
-        ok, status, body = http_get_json(POLICY_HOST, POLICY_PORT, "/health")
+        ok, status, body = service_clients.policy.get("/health")
         checks["policy"] = {"ready": ok, "status": status}
         if not ok:
             overall_ready = False
@@ -336,7 +282,7 @@ def readiness():
     
     # Check context service
     try:
-        ok, status, body = http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health")
+        ok, status, body = service_clients.context.get("/health")
         checks["context"] = {"ready": ok, "status": status}
         if not ok:
             overall_ready = False
@@ -346,7 +292,7 @@ def readiness():
     
     # Check storage service
     try:
-        ok, status, body = http_get_json(STORAGE_HOST, STORAGE_PORT, "/health")
+        ok, status, body = service_clients.storage.get("/health")
         checks["storage"] = {"ready": ok, "status": status}
         if not ok:
             overall_ready = False
@@ -356,7 +302,7 @@ def readiness():
     
     # Check inference service
     try:
-        ok, status, body = http_get_json(INFERENCE_HOST, INFERENCE_PORT, "/health")
+        ok, status, body = service_clients.inference.get("/health")
         checks["inference"] = {"ready": ok, "status": status}
         if not ok:
             overall_ready = False
@@ -482,26 +428,11 @@ def test_routing(request_body: Dict[str, Any] = Body(...)):
 def ready():
     rid = str(uuid.uuid4())
     hdrs = {"X-Event-ID": rid}
-    context_ok, _, _ = http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health", headers=hdrs)
-    storage_ok, _, _ = http_get_json(STORAGE_HOST, STORAGE_PORT, "/health", headers=hdrs)
-    inference_ok, _, _ = http_get_json(INFERENCE_HOST, INFERENCE_PORT, "/health", headers=hdrs)
-
-    eval_payload = {
-        "capability_id": "test.ACTION",
-        "context": {"actor": "local-user", "intent": "readiness-check"},
-    }
-    policy_ok, _, policy_body = http_post_json(
-        POLICY_HOST,
-        POLICY_PORT,
-        "/evaluate",
-        eval_payload,
-        headers=hdrs,
-    )
-
-    allowed = False
-    if policy_ok and isinstance(policy_body, dict):
-        decision = policy_body.get("decision", {})
-        allowed = decision.get("allowed", False) is True
+    services_health = fetch_core_health(service_clients, headers=hdrs)
+    context_ok, _, _ = services_health["context"]
+    storage_ok, _, _ = services_health["storage"]
+    inference_ok, _, _ = services_health["inference"]
+    allowed = readiness_allowed(service_clients, event_id=rid)
 
     all_ok = context_ok and storage_ok and inference_ok and allowed
 
@@ -518,225 +449,7 @@ def ready():
     log_json(logging.INFO, "readiness", service="unison-orchestrator", event_id=rid, context=context_ok, storage=storage_ok, inference=inference_ok, policy_allowed=allowed, ready=all_ok)
     return resp
 
-@app.post("/event")
-async def handle_event(
-    envelope: dict = Body(...),
-    current_user: Dict[str, Any] = Depends(verify_token)
-):
-    """Handle events with authentication and authorization"""
-    _metrics["/event"] += 1
-    
-    # Create security context
-    security_ctx = get_security_context(current_user)
-    
-    try:
-        # Validate and sanitize envelope
-        envelope = validate_event_envelope(envelope)
-    except EnvelopeValidationError as e:
-        log_json(
-            logging.WARNING,
-            "envelope_validation_failed",
-            service="unison-orchestrator",
-            error=str(e),
-            user=current_user.get("username"),
-            roles=current_user.get("roles", [])
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-    
-    # Add user context to envelope for policy evaluation
-    envelope["user"] = {
-        "username": current_user.get("username"),
-        "roles": current_user.get("roles", []),
-        "authenticated": True
-    }
-    
-    event_id = str(uuid.uuid4())
-    intent = envelope.get("intent", "")
-    source = envelope.get("source", "")
-    payload = envelope.get("payload", {})
-    
-    log_json(
-        logging.INFO,
-        "event_received",
-        service="unison-orchestrator",
-        event_id=event_id,
-        intent=intent,
-        source=source,
-        user=current_user.get("username"),
-        roles=current_user.get("roles", [])
-    )
-    
-    # Check if intent exists in skills registry
-    handler = _skills.get(intent)
-    if not handler:
-        log_json(
-            logging.WARNING,
-            "unknown_intent",
-            service="unison-orchestrator",
-            event_id=event_id,
-            intent=intent,
-            user=current_user.get("username")
-        )
-        raise HTTPException(status_code=404, detail=f"Unknown intent: {intent}")
-    
-    # Policy evaluation - check if user is allowed to execute this intent
-    eval_payload = {
-        "capability_id": f"unison.{intent}",
-        "context": {
-            "actor": current_user.get("username"),
-            "intent": intent,
-            "source": source,
-            "auth_scope": envelope.get("auth_scope"),
-            "safety_context": envelope.get("safety_context"),
-            "user_roles": current_user.get("roles", [])
-        },
-    }
-    
-    policy_ok, _, policy_body = http_post_json(
-        POLICY_HOST, POLICY_PORT, "/evaluate", eval_payload,
-        headers={"X-Event-ID": event_id}
-    )
-    
-    allowed = False
-    if policy_ok and isinstance(policy_body, dict):
-        decision = policy_body.get("decision", {})
-        allowed = decision.get("allowed", False) is True
-    
-    if not allowed:
-        reason = decision.get("reason", "Policy denied")
-        log_json(
-            logging.WARNING,
-            "policy_denied",
-            service="unison-orchestrator",
-            event_id=event_id,
-            intent=intent,
-            reason=reason,
-            user=current_user.get("username"),
-            roles=current_user.get("roles", [])
-        )
-        raise HTTPException(status_code=403, detail=f"Policy denied: {reason}")
-    
-    # Execute the skill handler
-    try:
-        result = handler(envelope)
-        
-        log_json(
-            logging.INFO,
-            "event_completed",
-            service="unison-orchestrator",
-            event_id=event_id,
-            intent=intent,
-            user=current_user.get("username"),
-            success=True
-        )
-        
-        return {
-            "ok": True,
-            "event_id": event_id,
-            "intent": intent,
-            "result": result,
-            "user": current_user.get("username")
-        }
-        
-    except Exception as e:
-        log_json(
-            logging.ERROR,
-            "handler_error",
-            service="unison-orchestrator",
-            event_id=event_id,
-            intent=intent,
-            error=str(e),
-            user=current_user.get("username")
-        )
-        raise HTTPException(status_code=500, detail=f"Handler error: {str(e)}")
-
-@app.get("/introspect")
-def introspect():
-    eid = str(uuid.uuid4())
-    hdrs = {"X-Event-ID": eid}
-    ctx_ok, ctx_status, _ = http_get_json(CONTEXT_HOST, CONTEXT_PORT, "/health", headers=hdrs)
-    stor_ok, stor_status, _ = http_get_json(STORAGE_HOST, STORAGE_PORT, "/health", headers=hdrs)
-    pol_ok, pol_status, _ = http_get_json(POLICY_HOST, POLICY_PORT, "/health", headers=hdrs)
-    rules_ok, rules_status, rules = http_get_json(POLICY_HOST, POLICY_PORT, "/rules/summary", headers=hdrs)
-
-    result = {
-        "event_id": eid,
-        "services": {
-            "context": {"ok": ctx_ok, "status": ctx_status, "host": CONTEXT_HOST, "port": CONTEXT_PORT},
-            "storage": {"ok": stor_ok, "status": stor_status, "host": STORAGE_HOST, "port": STORAGE_PORT},
-            "policy": {"ok": pol_ok, "status": pol_status, "host": POLICY_HOST, "port": POLICY_PORT},
-        },
-        "skills": list(_skills.keys()),
-        "policy_rules": {
-            "ok": rules_ok,
-            "status": rules_status,
-            "summary": rules if isinstance(rules, dict) else None,
-        },
-    }
-    log_json(
-        logging.INFO,
-        "introspect",
-        service="unison-orchestrator",
-        event_id=eid,
-        context_ok=ctx_ok,
-        storage_ok=stor_ok,
-        policy_ok=pol_ok,
-        rules=rules.get("count") if isinstance(rules, dict) else None,
-    )
-    return result
-
-@app.post("/event/confirm")
-def confirm_event(body: Dict[str, Any] = Body(...)):
-    _metrics["/event/confirm"] += 1
-    _prune_pending()
-    token = body.get("confirmation_token")
-    log_json(logging.INFO, "confirm_request", service="unison-orchestrator", token=str(token))
-    if not isinstance(token, str) or token not in _pending_confirms:
-        # Attempt to load from storage for durability across restarts
-        ok_s, st_s, body_s = http_get_json(STORAGE_HOST, STORAGE_PORT, f"/kv/confirm/{token}")
-        if not ok_s or not isinstance(body_s, dict) or not body_s.get("ok"):
-            raise HTTPException(status_code=404, detail="Invalid or expired confirmation token")
-        envelope = body_s.get("envelope")
-        if not envelope:
-            raise HTTPException(status_code=404, detail="Confirmation token corrupted")
-        _pending_confirms[token] = {
-            "envelope": envelope,
-            "matched": None,
-            "handler_name": None,
-            "created_at": time.time(),
-            "expires_at": time.time() + CONFIRM_TTL_SECONDS,
-        }
-    
-    data = _pending_confirms[token]
-    envelope = data["envelope"]
-    event_id = str(uuid.uuid4())
-    intent = envelope.get("intent", "")
-    
-    # Dispatch to handler
-    handler = _skills.get(intent)
-    if not handler:
-        raise HTTPException(status_code=404, detail=f"Intent {intent} not found")
-    
-    try:
-        result = handler(envelope)
-        # Clean up confirmation
-        _pending_confirms.pop(token, None)
-        # Remove from storage
-        http_post_json(STORAGE_HOST, STORAGE_PORT, f"/kv/delete/confirm/{token}", {})
-        log_json(logging.INFO, "confirm_completed", service="unison-orchestrator", event_id=event_id, intent=intent, token=token)
-        return {
-            "ok": True,
-            "event_id": event_id,
-            "intent": intent,
-            "result": result,
-            "confirmed": True,
-        }
-    except Exception as e:
-        log_json(logging.ERROR, "confirm_handler_error", service="unison-orchestrator", event_id=event_id, intent=intent, error=str(e), token=token)
-        raise HTTPException(status_code=500, detail=f"Handler error: {str(e)}")
-
-# Handler mapping for dynamic skill registration
-_HANDLERS = {
+*** End Patch  notificatio
     "echo": _handler_echo,
     "inference": _handler_inference,
     "summarize_doc": _handler_summarize_doc,
@@ -746,194 +459,19 @@ _HANDLERS = {
 
 # Skills already registered above (lines 174-180)
 
+register_event_routes(
+    app,
+    service_clients=service_clients,
+    skills=_skills,
+    metrics=_metrics,
+    pending_confirms=_pending_confirms,
+    confirm_ttl_seconds=CONFIRM_TTL_SECONDS,
+    require_consent_flag=REQUIRE_CONSENT,
+    prune_pending=_prune_pending,
+    endpoints=endpoints,
+)
+
 # --- M4: Golden Path v1 - /ingest with authentication ---
-REQUIRE_CONSENT = os.getenv("UNISON_REQUIRE_CONSENT", "false").lower() == "true"
-
-@app.post("/ingest")
-async def ingest_m4(
-    request: Request,
-    body: Dict[str, Any] = Body(...),
-    current_user: Dict[str, Any] = Depends(verify_token),
-    consent_grant: Dict[str, Any] = Depends(require_consent([ConsentScopes.INGEST_WRITE])) if REQUIRE_CONSENT else None,
-):
-    """M5.2: Ingest with JWT authentication and consent verification.
-    Request body example: {"intent": "echo", "payload": {"message": "hello"}}
-    Requires: 
-    - Authorization header with valid JWT token
-    - X-Consent-Grant header with consent grant for ingest.write scope (optional for now)
-    """
-    # M5.1: Get tracer for custom spans
-    tracer = trace.get_tracer(__name__)
-    
-    # M5.4: Rate limiting
-    user_rate_limiter = get_user_rate_limiter()
-    endpoint_rate_limiter = get_endpoint_rate_limiter()
-    
-    # Check user rate limit
-    if not user_rate_limiter.is_allowed(current_user.get("username")):
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded. Please try again later.",
-            headers={"Retry-After": "60"}
-        )
-    
-    # Check endpoint rate limit
-    if not endpoint_rate_limiter.is_allowed("/ingest"):
-        raise HTTPException(
-            status_code=429,
-            detail="Service temporarily unavailable. Please try again later.",
-            headers={"Retry-After": "60"}
-        )
-    
-    _metrics["/ingest"] += 1
-    
-    # Track total processing time
-    start_time = time.time()
-    
-    # Generate correlation ID for this request
-    correlation_id = str(uuid.uuid4())
-    trace_id = str(uuid.uuid4()).replace('-', '')[:32]
-    
-    # M5.1: Add span attributes for user context
-    current_span = trace.get_current_span()
-    current_span.set_attribute("user.id", current_user.get("username"))
-    current_span.set_attribute("user.roles", ",".join(current_user.get("roles", [])))
-    current_span.set_attribute("correlation.id", correlation_id)
-    current_span.set_attribute("trace.id", trace_id)
-    
-    # M5.2: Consent grant (feature-flagged)
-    if REQUIRE_CONSENT and consent_grant is not None:
-        logger.info(f"Consent grant verified for user {current_user.get('username')}")
-        current_span.set_attribute("consent.verified", "true")
-        current_span.set_attribute("consent.scopes", ",".join(consent_grant.get("scopes", [])))
-    
-    # Extract intent and payload from body
-    intent = body.get("intent", "")
-    payload = body.get("payload", {})
-    source = body.get("source", "test-client")
-    
-    # M5.1: Add intent to span
-    current_span.set_attribute("intent.type", intent)
-    current_span.set_attribute("request.source", source)
-    
-    # Validate required fields
-    if not intent:
-        raise HTTPException(status_code=400, detail="intent is required")
-    
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be an object")
-    
-    # M5.2: Store ingest request event with user and consent context
-    envelope_data = {
-        "intent": intent,
-        "payload": payload,
-        "source": source,
-        "user": current_user.get("username"),
-        "roles": current_user.get("roles", [])
-    }
-    
-    # Add consent context if available
-    if REQUIRE_CONSENT and consent_grant is not None:
-        envelope_data["consent"] = {
-            "subject": consent_grant.get("sub"),
-            "scopes": consent_grant.get("scopes", []),
-            "grant_id": consent_grant.get("jti"),
-            "verified": True,
-        }
-    
-    store_processing_envelope(
-        envelope_data=envelope_data,
-        trace_id=trace_id,
-        correlation_id=correlation_id,
-        event_type="ingest_request",
-        source="orchestrator",
-        user_id=current_user.get("username"),
-        processing_time_ms=None,
-        status_code=200,
-        error_message=None
-    )
-    
-    # Process based on intent
-    if intent == "echo":
-        # Echo skill processing
-        message = payload.get("message", "")
-        
-        if not message:
-            raise HTTPException(status_code=400, detail="message is required for echo intent")
-        
-        # M3: Store skill processing start event
-        store_processing_envelope(
-            envelope_data={"intent": intent, "message": message},
-            trace_id=trace_id,
-            correlation_id=correlation_id,
-            event_type="skill_start",
-            source="orchestrator",
-            user_id=None
-        )
-        
-        # Call echo skill handler
-        try:
-            # M5.1: Create custom span for skill execution
-            with tracer.start_as_current_span("skill.echo") as skill_span:
-                skill_span.set_attribute("skill.name", "echo")
-                skill_span.set_attribute("skill.message", message)
-                
-                echo_result = _handler_echo({"payload": {"message": message}, "source": source})
-                
-                skill_span.set_attribute("skill.result", "success")
-            
-            # Calculate total duration
-            total_duration = (time.time() - start_time) * 1000
-            
-            # M5.4: Record performance metrics
-            perf_monitor = get_performance_monitor()
-            perf_monitor.record("ingest_latency_ms", total_duration)
-            perf_monitor.record("skill_execution_ms", total_duration)
-            
-            # M3: Store skill processing complete event
-            store_processing_envelope(
-                envelope_data={"intent": intent, "result": echo_result},
-                trace_id=trace_id,
-                correlation_id=correlation_id,
-                event_type="skill_complete",
-                source="orchestrator",
-                user_id=None,
-                processing_time_ms=total_duration,
-                status_code=200
-            )
-            
-            # Return response
-            return {
-                "status": "success",
-                "trace_id": trace_id,
-                "correlation_id": correlation_id,
-                "result": {
-                    "intent": intent,
-                    "response": echo_result.get("echo", {}).get("message", message),
-                    "processed_at": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
-                },
-                "duration_ms": round(total_duration, 2)
-            }
-            
-        except Exception as e:
-            # M3: Store error event
-            store_processing_envelope(
-                envelope_data={"intent": intent, "error": str(e)},
-                trace_id=trace_id,
-                correlation_id=correlation_id,
-                event_type="error",
-                source="orchestrator",
-                user_id=None,
-                error_message=str(e),
-                status_code=500
-            )
-            raise HTTPException(status_code=500, detail=f"Skill processing failed: {str(e)}")
-    
-    else:
-        # Unsupported intent
-        raise HTTPException(status_code=400, detail=f"Unsupported intent: {intent}. Only 'echo' is supported in M2.")
-
-
 # --- M5.3: Enhanced Replay Endpoints (with filtering) ---
 @app.get("/replay/traces")
 async def list_traces_m5(
