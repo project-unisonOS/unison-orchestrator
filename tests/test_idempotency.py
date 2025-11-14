@@ -465,18 +465,17 @@ class TestIdempotencyKeyRequiredMiddleware:
     @pytest.mark.asyncio
     async def test_required_path_without_key(self, middleware):
         """Test required path without idempotency key should raise exception"""
-        from fastapi import Request, HTTPException
+        from fastapi import Request
+        import json
         
         mock_request = Mock(spec=Request)
         mock_request.url.path = "/ingest"
         mock_request.headers = {}
         
-        # This should raise an HTTPException
-        with pytest.raises(HTTPException) as exc_info:
-            await middleware.dispatch(mock_request, Mock())
-        
-        assert exc_info.value.status_code == 400
-        assert "Idempotency key required" in str(exc_info.value.detail)
+        response = await middleware.dispatch(mock_request, Mock())
+        assert response.status_code == 400
+        detail = json.loads(response.body.decode()).get("detail", "")
+        assert "Idempotency-Key" in detail
 
 
 class TestGlobalManager:
@@ -505,6 +504,7 @@ class TestIdempotencyResponseHelpers:
     def test_create_idempotency_response(self):
         """Test creating idempotency response"""
         from fastapi.responses import JSONResponse
+        import json
         
         test_key = str(uuid.uuid4())
         response_data = {"message": "success"}
@@ -512,7 +512,7 @@ class TestIdempotencyResponseHelpers:
         response = create_idempotency_response(test_key, response_data, 201)
         
         assert response.status_code == 201
-        assert response.body == json.dumps(response_data).encode()
+        assert json.loads(response.body.decode()) == response_data
         assert response.headers["Idempotency-Key"] == test_key
         assert response.headers["Idempotency-Original-Response"] == "201"
         assert "Idempotency-Created-At" in response.headers

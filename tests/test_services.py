@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from src.orchestrator.services.health import fetch_core_health, fetch_policy_rules
-from src.orchestrator.services.policy import readiness_allowed
+from src.orchestrator.context_client import fetch_core_health
+from src.orchestrator.policy_client import fetch_policy_rules, readiness_allowed
 
 
 def make_clients():

@@ -1,26 +1,6 @@
-from __future__ import annotations
+"""Backwards-compatible re-exports for legacy imports."""
 
-from typing import Dict, Optional, Tuple
+from ..context_client import HealthResult, fetch_core_health
+from ..policy_client import fetch_policy_rules
 
-from ..clients import ServiceClients
-
-HealthResult = Tuple[bool, int, Optional[dict]]
-
-
-def fetch_core_health(
-    clients: ServiceClients, *, headers: Optional[Dict[str, str]] = None
-) -> Dict[str, HealthResult]:
-    """Ping core downstream services and return their health responses."""
-    return {
-        "context": clients.context.get("/health", headers=headers),
-        "storage": clients.storage.get("/health", headers=headers),
-        "inference": clients.inference.get("/health", headers=headers),
-        "policy": clients.policy.get("/health", headers=headers),
-    }
-
-
-def fetch_policy_rules(
-    clients: ServiceClients, *, headers: Optional[Dict[str, str]] = None
-) -> HealthResult:
-    """Fetch policy rule summary for introspection."""
-    return clients.policy.get("/rules/summary", headers=headers)
+__all__ = ["HealthResult", "fetch_core_health", "fetch_policy_rules"]

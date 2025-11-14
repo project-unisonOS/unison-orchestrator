@@ -171,6 +171,12 @@ def test_event_policy_denied(route_app):
     assert "Policy denied" in resp.text
 
 
+def test_event_route_rejects_invalid_envelope(route_app):
+    resp = route_app.client.post("/event", json={"intent": "echo"})
+    assert resp.status_code == 400
+    assert "Missing required field" in resp.json()["detail"]
+
+
 def test_introspect_returns_service_health(route_app):
     route_app.service_clients.context.get.return_value = (True, 200, {})
     route_app.service_clients.storage.get.return_value = (True, 200, {})

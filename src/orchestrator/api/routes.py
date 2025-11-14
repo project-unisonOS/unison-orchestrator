@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Callable, Dict, MutableMapping, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -23,8 +24,8 @@ from unison_common import (
     get_user_rate_limiter,
     require_consent,
     validate_event_envelope,
-    verify_token,
 )
+from unison_common.auth import verify_token
 from unison_common.consent import ConsentScopes
 from unison_common.logging import log_json
 from unison_common.replay_endpoints import store_processing_envelope
@@ -434,7 +435,7 @@ def register_event_routes(
                 "result": {
                     "intent": intent,
                     "response": echo_result.get("echo", {}).get("message", message),
-                    "processed_at": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime()),
+                    "processed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 },
                 "duration_ms": round(total_duration, 2),
             }

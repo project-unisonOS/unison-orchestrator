@@ -4,8 +4,8 @@ from fastapi import Request
 import httpx
 
 from unison_common.consent import ConsentScopes, clear_consent_cache
-import os, sys
-
+from unison_common.auth import verify_token
+import os, sys, uuid, importlib
 
 def make_consent_app():
     from fastapi import FastAPI
@@ -43,14 +43,28 @@ def test_orchestrator_ingest_requires_consent(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", _patched_async_client)
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-    from server import app as orch_app
+    server = importlib.import_module("server")
+    importlib.reload(server)
+    orch_app = server.app
+
+    async def fake_verify_token():
+        return {"username": "tester", "roles": ["operator"]}
+
+    orch_app.dependency_overrides[verify_token] = fake_verify_token
     client = TestClient(orch_app)
 
     payload = {"intent": "echo", "payload": {"message": "hi"}}
 
-    r_forbidden = client.post("/ingest", json=payload, headers={"Authorization": "Bearer none"})
+    def _headers(token):
+        return {
+            "Authorization": f"Bearer {token}",
+            "Idempotency-Key": str(uuid.uuid4()),
+        }
+
+    r_forbidden = client.post("/ingest", json=payload, headers=_headers("none"))
     assert r_forbidden.status_code == 403
 
-    r_ok = client.post("/ingest", json=payload, headers={"Authorization": "Bearer valid-write"})
+    r_ok = client.post("/ingest", json=payload, headers=_headers("valid-write"))
     # Allow 403/401 if other auth requirements exist; we just ensure consent isn't the blocker.
     assert r_ok.status_code in (200, 401, 403)
+    orch_app.dependency_overrides.pop(verify_token, None)
