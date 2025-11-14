@@ -6,7 +6,7 @@ import pytest
 import time
 import uuid
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch, AsyncMock
 
 from unison_common.idempotency import (
@@ -57,7 +57,7 @@ class TestIdempotencyRecord:
     
     def test_record_creation(self):
         """Test creating an idempotency record"""
-        now = datetime.utcnow()
+        now = now_utc()
         expires_at = now + timedelta(hours=1)
         
         record = IdempotencyRecord(
@@ -78,7 +78,7 @@ class TestIdempotencyRecord:
     
     def test_record_serialization(self):
         """Test record to/from dictionary conversion"""
-        now = datetime.utcnow()
+        now = now_utc()
         expires_at = now + timedelta(hours=1)
         
         record = IdempotencyRecord(
@@ -115,7 +115,7 @@ class TestMemoryIdempotencyStore:
     
     def test_store_and_retrieve(self, store):
         """Test storing and retrieving records"""
-        now = datetime.utcnow()
+        now = now_utc()
         expires_at = now + timedelta(hours=1)
         
         record = IdempotencyRecord(
@@ -143,7 +143,7 @@ class TestMemoryIdempotencyStore:
     
     def test_delete_record(self, store):
         """Test deleting a record"""
-        now = datetime.utcnow()
+        now = now_utc()
         expires_at = now + timedelta(hours=1)
         
         record = IdempotencyRecord(
@@ -166,7 +166,7 @@ class TestMemoryIdempotencyStore:
     
     def test_expired_record_cleanup(self, store):
         """Test cleanup of expired records"""
-        now = datetime.utcnow()
+        now = now_utc()
         expired_time = now - timedelta(hours=1)  # Already expired
         
         record = IdempotencyRecord(
@@ -182,7 +182,7 @@ class TestMemoryIdempotencyStore:
     
     def test_capacity_limit(self, store):
         """Test store capacity limit"""
-        now = datetime.utcnow()
+        now = now_utc()
         expires_at = now + timedelta(hours=1)
         
         # Fill store to capacity
@@ -520,3 +520,5 @@ class TestIdempotencyResponseHelpers:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+def now_utc():
+    return datetime.now(timezone.utc)

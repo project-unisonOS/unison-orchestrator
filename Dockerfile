@@ -2,14 +2,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY unison-orchestrator/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r ./requirements.txt \
-    && pip install --no-cache-dir redis python-jose[cryptography] bleach httpx[http2]
+# Install git for pip VCS installs and clean up apt lists
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy orchestrator source (from monorepo root context)
-COPY unison-orchestrator/src ./src
-# Copy shared unison_common into src so it's on sys.path
-COPY unison-common/src/unison_common ./src/unison_common
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install "git+https://github.com/project-unisonOS/unison-common.git@main" \
+    && python -m pip install --no-cache-dir -r ./requirements.txt \
+    && python -m pip install --no-cache-dir redis python-jose[cryptography] bleach httpx[http2]
+
+# Copy orchestrator source
+COPY src ./src
 
 # Ensure Python can import from /app/src
 ENV PYTHONPATH=/app/src

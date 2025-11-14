@@ -1,5 +1,16 @@
 from fastapi.testclient import TestClient
-from src.server import app
+import os, importlib
+
+# Allow TestClient host through TrustedHostMiddleware
+os.environ["UNISON_ALLOWED_HOSTS"] = "testserver,localhost,127.0.0.1,orchestrator"
+
+server = importlib.import_module("src.server")
+server = importlib.reload(server)
+app = server.app
+app.dependency_overrides[server.verify_token] = lambda: {
+    "username": "test-user",
+    "roles": ["tester"],
+}
 
 
 def test_health():

@@ -3,8 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPBearer
 import uvicorn
-import os
 import httpx
+import inspect
 import json
 from typing import Any, Dict, Tuple, List, Callable, Optional
 import asyncio
@@ -15,13 +15,11 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from unison_common import (
     validate_event_envelope, 
     EnvelopeValidationError,
-    verify_token,
     verify_service_token,
     require_roles,
     require_role,
@@ -46,6 +44,7 @@ from unison_common import (
     get_request_id,
     create_tracing_client,
 )
+from unison_common.auth import verify_token
 from unison_common.logging import configure_logging, log_json
 from unison_common.http_client import http_post_json_with_retry, http_get_json_with_retry, http_put_json_with_retry
 from unison_common.auth import rate_limit
@@ -54,20 +53,28 @@ from unison_common.replay_endpoints import store_processing_envelope
 from unison_common.idempotency_middleware import IdempotencyMiddleware, IdempotencyKeyRequiredMiddleware
 from unison_common.idempotency import IdempotencyManager, IdempotencyConfig, get_idempotency_manager
 from unison_common.consent import require_consent, ConsentScopes
-from router import Router, RoutingStrategy, RoutingContext, RouteCandidate
+from src.router import Router, RoutingStrategy, RoutingContext, RouteCandidate
+
+try:  # pragma: no cover - import shim for tests invoking module directly
+    from .settings import OrchestratorSettings, TelemetrySettings
+except ImportError:  # pragma: no cover
+    from settings import OrchestratorSettings, TelemetrySettings
 import logging
 import uuid
 import time
 from collections import defaultdict
 
+settings = OrchestratorSettings.from_env()
+endpoints = settings.endpoints
+
+
 # M5.1: Initialize OpenTelemetry
-def setup_telemetry():
+def setup_telemetry(telemetry: TelemetrySettings):
     """Configure OpenTelemetry tracing"""
-    # Get configuration from environment
-    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318")
-    service_name = os.getenv("OTEL_SERVICE_NAME", "unison-orchestrator")
-    service_version = os.getenv("OTEL_SERVICE_VERSION", "1.0.0")
-    
+    otlp_endpoint = telemetry.exporter_endpoint
+    service_name = telemetry.service_name
+    service_version = telemetry.service_version
+
     # Create resource with service information
     resource = Resource(attributes={
         SERVICE_NAME: service_name,
@@ -76,24 +83,32 @@ def setup_telemetry():
     
     # Configure tracer provider
     provider = TracerProvider(resource=resource)
-    
-    # Add OTLP exporter with batch processor
-    otlp_exporter = OTLPSpanExporter(
-        endpoint=f"{otlp_endpoint}/v1/traces",
-        timeout=10
-    )
-    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+
+    if otlp_endpoint:
+        otlp_exporter = OTLPSpanExporter(
+            endpoint=f"{otlp_endpoint}/v1/traces",
+            timeout=10
+        )
+        provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+        logging.info("OTLP exporter enabled for %s at %s", service_name, otlp_endpoint)
+    else:
+        logging.info("OTLP exporter disabled for %s (no endpoint configured)", service_name)
     
     # Set as global tracer provider
     trace.set_tracer_provider(provider)
     
-    # Instrument HTTPX for outgoing requests
-    HTTPXClientInstrumentor().instrument()
+    # Instrument HTTPX for outgoing requests when client class is available
+    if inspect.isclass(httpx.AsyncClient):
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+        HTTPXClientInstrumentor().instrument()
+    else:
+        logging.warning("HTTPX instrumentation skipped: httpx.AsyncClient patched to non-class")
     
-    logging.info(f"OpenTelemetry configured: {service_name} -> {otlp_endpoint}")
+    logging.info("OpenTelemetry instrumentation initialized for %s", service_name)
 
 # Initialize telemetry
-setup_telemetry()
+setup_telemetry(settings.telemetry)
 
 app = FastAPI(
     title="unison-orchestrator",
@@ -137,10 +152,9 @@ app.add_middleware(IdempotencyMiddleware, ttl_seconds=idempotency_config.ttl_sec
 app.add_middleware(IdempotencyKeyRequiredMiddleware, required_paths=['/ingest'])
 
 # Trusted hosts middleware (prevents host header attacks)
-allowed_hosts = os.getenv("UNISON_ALLOWED_HOSTS", "localhost,127.0.0.1,orchestrator").split(",")
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=allowed_hosts
+    allowed_hosts=settings.allowed_hosts
 )
 
 # Security headers middleware
@@ -166,18 +180,17 @@ _metrics = defaultdict(int)
 _start_time = time.time()
 
 # Router configuration
-ROUTING_STRATEGY = os.getenv("UNISON_ROUTING_STRATEGY", "rule_based")
-router = Router(RoutingStrategy(ROUTING_STRATEGY))
+router = Router(RoutingStrategy(settings.routing_strategy))
 
-CONTEXT_HOST = os.getenv("UNISON_CONTEXT_HOST", "context")
-CONTEXT_PORT = os.getenv("UNISON_CONTEXT_PORT", "8081")
-STORAGE_HOST = os.getenv("UNISON_STORAGE_HOST", "storage")
-STORAGE_PORT = os.getenv("UNISON_STORAGE_PORT", "8082")
-POLICY_HOST = os.getenv("UNISON_POLICY_HOST", "policy")
-POLICY_PORT = os.getenv("UNISON_POLICY_PORT", "8083")
-INFERENCE_HOST = os.getenv("UNISON_INFERENCE_HOST", "inference")
-INFERENCE_PORT = os.getenv("UNISON_INFERENCE_PORT", "8087")
-CONFIRM_TTL_SECONDS = int(os.getenv("UNISON_CONFIRM_TTL", "300"))
+CONTEXT_HOST = endpoints.context_host
+CONTEXT_PORT = endpoints.context_port
+STORAGE_HOST = endpoints.storage_host
+STORAGE_PORT = endpoints.storage_port
+POLICY_HOST = endpoints.policy_host
+POLICY_PORT = endpoints.policy_port
+INFERENCE_HOST = endpoints.inference_host
+INFERENCE_PORT = endpoints.inference_port
+CONFIRM_TTL_SECONDS = settings.confirm_ttl_seconds
 
 def http_get_json(host: str, port: str, path: str, headers: Dict[str, str] | None = None) -> Tuple[bool, int, dict | None]:
     return http_get_json_with_retry(host, port, path, headers=headers, max_retries=3, base_delay=0.1, max_delay=2.0, timeout=2.0)
@@ -747,7 +760,7 @@ _HANDLERS = {
 # Skills already registered above (lines 174-180)
 
 # --- M4: Golden Path v1 - /ingest with authentication ---
-REQUIRE_CONSENT = os.getenv("UNISON_REQUIRE_CONSENT", "false").lower() == "true"
+REQUIRE_CONSENT = settings.require_consent
 
 @app.post("/ingest")
 async def ingest_m4(
