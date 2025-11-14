@@ -1,6 +1,10 @@
 from fastapi.testclient import TestClient
 import src.server as srv
 
+srv.app.dependency_overrides[srv.verify_token] = lambda: {
+    "username": "test-user",
+    "roles": ["tester"],
+}
 client = TestClient(srv.app)
 
 
