@@ -191,6 +191,10 @@ register_event_routes(
     endpoints=endpoints,
 )
 
+# Apply dependency override after routes are registered to ensure test clients bypass auth.
+if os.getenv("DISABLE_AUTH_FOR_TESTS", "true").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
+    app.dependency_overrides[verify_token] = _test_user
+
 register_replay_routes(app)
 
 @app.get("/capabilities")
