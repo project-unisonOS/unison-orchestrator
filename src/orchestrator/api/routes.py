@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+import os
 from datetime import datetime
 from typing import Any, Callable, Dict, MutableMapping, Optional
 
@@ -36,6 +37,15 @@ SkillsRegistry = Dict[str, Skill]
 PendingConfirms = MutableMapping[str, Dict[str, Any]]
 
 
+def _auth_dependency():
+    """Return a test user when auth is disabled, otherwise defer to verify_token."""
+    if os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() == "true":
+        async def _test_user():
+            return {"username": "test-user", "roles": ["admin"]}
+        return _test_user
+    return verify_token
+
+
 def _ingest_consent_dependency(require_consent_flag: bool):
     if not require_consent_flag:
         async def _optional_consent():
@@ -64,7 +74,7 @@ def register_event_routes(
     @api.post("/event")
     async def handle_event(
         envelope: dict = Body(...),
-        current_user: Dict[str, Any] = Depends(verify_token),
+        current_user: Dict[str, Any] = Depends(_auth_dependency()),
     ):
         metrics["/event"] += 1
 
