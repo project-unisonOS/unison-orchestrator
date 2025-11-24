@@ -105,8 +105,21 @@ try:
     from unison_common.multimodal import CapabilityClient
     _capabilities = CapabilityClient.from_env()
     _capabilities.refresh()
+    publish_capabilities_to_context()
 except Exception:
     _capabilities = None
+
+# Push manifest into context-graph at startup
+def publish_capabilities_to_context():
+    if not _capabilities:
+        return
+    try:
+        manifest = _capabilities.manifest or {}
+        ok, status, _ = service_clients.context.post("/capabilities", manifest)
+        if not ok:
+            logger.warning("Failed to publish capabilities to context-graph: status=%s", status)
+    except Exception as exc:
+        logger.warning("Error publishing capabilities to context-graph: %s", exc)
 
 # M4: Initialize idempotency manager
 idempotency_config = IdempotencyConfig()

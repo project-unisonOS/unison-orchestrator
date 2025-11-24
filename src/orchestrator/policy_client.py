@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 import os
 
-from .clients import ServiceClients
+from .clients import ServiceClients, ServiceHttpClient
 
 PolicyResponse = Tuple[bool, int, Optional[Dict[str, Any]]]
 
@@ -16,7 +16,8 @@ def evaluate_capability(
 ) -> PolicyResponse:
     """Evaluate a capability request via the policy service."""
     # Test-friendly stub: allow monkeypatching src.server.http_post_json to avoid network calls
-    if os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() == "true":
+    # when using a real ServiceHttpClient (but honor mocks passed in tests).
+    if isinstance(clients.policy, ServiceHttpClient) and os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() == "true":
         try:
             import src.server as srv  # type: ignore
             if hasattr(srv, "http_post_json"):
