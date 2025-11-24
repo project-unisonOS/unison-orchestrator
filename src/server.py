@@ -4,6 +4,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 import logging
 import time
 import uvicorn
+import os
 from datetime import datetime
 from typing import Any, Dict
 
@@ -102,8 +103,9 @@ idempotency_config.ttl_seconds = 24 * 60 * 60  # 24 hours
 # Note: Using in-memory store for M4; Redis integration can be added later
 app.add_middleware(IdempotencyMiddleware, ttl_seconds=idempotency_config.ttl_seconds)
 
-# Add idempotency key requirement for critical endpoints (M4: re-enabled)
-app.add_middleware(IdempotencyKeyRequiredMiddleware, required_paths=['/ingest'])
+# Add idempotency key requirement for critical endpoints (optional)
+if os.getenv("ENABLE_IDEMPOTENCY_REQUIRED", "false").lower() == "true":
+    app.add_middleware(IdempotencyKeyRequiredMiddleware, required_paths=['/ingest'])
 
 # Trusted hosts middleware (prevents host header attacks)
 app.add_middleware(
