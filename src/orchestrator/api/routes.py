@@ -148,6 +148,15 @@ def register_event_routes(
 
         if not allowed:
             reason = decision.get("reason", "Policy denied")
+            requires_confirmation = decision.get("require_confirmation", False)
+            suggested_alternative = decision.get("suggested_alternative")
+            if requires_confirmation:
+                return {
+                    "accepted": False,
+                    "require_confirmation": True,
+                    "policy_suggested_alternative": suggested_alternative,
+                    "decision": decision,
+                }
             log_json(
                 logging.WARNING,
                 "policy_denied",
