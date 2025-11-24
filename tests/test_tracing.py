@@ -21,7 +21,10 @@ from unison_common.tracing import (
     set_span_ok,
     CorrelationMiddleware,
     get_correlation_id,
-    get_trace_context
+    get_trace_context,
+    trace_http_request,
+    trace_service_call,
+    trace_database_operation,
 )
 
 class TestTracingConfig:

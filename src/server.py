@@ -16,6 +16,8 @@ from orchestrator.skills import build_skill_state
 from unison_common import (
     AuthError,
     PermissionError,
+    BatonMiddleware,
+    BatonService,
     TracingMiddleware,
     add_security_headers,
     get_auth_cache,
@@ -82,6 +84,18 @@ app.add_middleware(
 app.add_middleware(TracingMiddleware, service_name="unison-orchestrator")
 logger.info("P0.3: Tracing middleware enabled")
 
+# Context baton validation (optional; only enforces signature/expiry if header is present)
+app.add_middleware(BatonMiddleware)
+logger.info("Context baton middleware enabled (optional validation)")
+
+# Multimodal capabilities
+try:
+    from unison_common.multimodal import CapabilityClient
+    _capabilities = CapabilityClient.from_env()
+    _capabilities.refresh()
+except Exception:
+    _capabilities = None
+
 # M4: Initialize idempotency manager
 idempotency_config = IdempotencyConfig()
 idempotency_config.ttl_seconds = 24 * 60 * 60  # 24 hours
@@ -126,6 +140,12 @@ skill_state = build_skill_state(service_clients)
 _skills: Dict[str, Any] = skill_state["skills"]
 _skill_handlers = skill_state["handlers"]
 
+# Legacy helper expected in tests; routes use ServiceClients for HTTP calls.
+def http_post_json(host, port, path, payload, headers=None):
+    from unison_common.http_client import http_post_json_with_retry
+
+    return http_post_json_with_retry(host, port, path, payload, headers=headers)
+
 # --- Confirmation tracking ---
 _pending_confirms: Dict[str, Dict[str, Any]] = {}
 
@@ -164,6 +184,30 @@ register_event_routes(
 )
 
 register_replay_routes(app)
+
+@app.get("/capabilities")
+async def capabilities():
+    if not _capabilities:
+        raise HTTPException(status_code=503, detail="capabilities unavailable")
+    manifest = _capabilities.manifest or {}
+    return {"manifest": manifest, "displays": _capabilities.modality_count("displays")}
+
+
+def publish_capabilities_to_context():
+    if not _capabilities:
+        return
+    try:
+        manifest = _capabilities.manifest or {}
+        ok, status, _ = service_clients.context.post("/capabilities", manifest)
+        if not ok:
+            logger.warning("Failed to publish capabilities to context-graph: status=%s", status)
+    except Exception as exc:
+        logger.warning("Error publishing capabilities to context-graph: %s", exc)
+
+
+@app.on_event("startup")
+def _publish_manifest_startup():
+    publish_capabilities_to_context()
 
 @app.get("/performance/metrics")
 async def get_performance_metrics_m5(
