@@ -127,6 +127,7 @@ class ToolRegistry:
                     "parameters": tool.parameters,
                     "source": tool.source,
                     "mcp_server": tool.mcp_server,
+                    "scope": tool.scope or "global",
                 }
             )
         tool_names = sorted(t.name for t in self._tools.values())
@@ -151,6 +152,9 @@ class CompanionSessionManager:
         self._clients = service_clients
         self._registry = tool_registry or ToolRegistry()
         self._memory: Dict[str, List[Dict[str, Any]]] = {}
+        self._registry.refresh_from_mcp()
+        self._registry.refresh_from_context_graph(self._clients)
+        self._registry.publish_to_context_graph(self._clients)
 
     def process_turn(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         event_id = envelope.get("event_id", str(uuid.uuid4()))
