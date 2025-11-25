@@ -5,8 +5,10 @@ from typing import Any, Callable, Dict
 
 from .clients import ServiceClients
 from .companion import CompanionSessionManager, ToolRegistry
+from .context_client import dashboard_get, dashboard_put
 import os
 import httpx
+import time
 
 SkillHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
 
@@ -171,20 +173,32 @@ def build_skill_state(
         prefs = {}
         if profile_ok and isinstance(profile_body, dict):
             prefs = (profile_body.get("profile") or {}).get("dashboard", {}).get("preferences", {})
-        # Build simple priority cards (stub)
+        # Build priority cards (stub + existing dashboard resume)
+        existing_dashboard = dashboard_get(service_clients, person_id)
+        existing_cards = existing_dashboard.get("cards") or []
         cards = payload.get("cards")
         if not cards:
+            # Stub priority cards; replace with real data fetches later
             cards = [
                 {
                     "id": "dashboard-1",
                     "type": "summary",
                     "title": "Your morning briefing",
                     "body": "Schedule, comms, and tasks summarized.",
-                }
+                    "tool_activity": "calendar.refresh",
+                },
+                {
+                    "id": "dashboard-2",
+                    "type": "comms",
+                    "title": "Messages to respond to",
+                    "body": "2 priority replies pending.",
+                    "tool_activity": "comms.triage",
+                },
             ]
-        dashboard_state = {"cards": cards, "preferences": prefs, "person_id": person_id, "updated_at": time.time()}
+        merged_cards = cards + existing_cards
+        dashboard_state = {"cards": merged_cards[:10], "preferences": prefs, "person_id": person_id, "updated_at": time.time()}
         # Persist to context
-        service_clients.context.post(f"/dashboard/{person_id}", {"dashboard": dashboard_state})
+        dashboard_put(service_clients, person_id, dashboard_state)
         # Emit to renderer experiences if configured
         renderer_url = os.getenv("UNISON_RENDERER_URL")
         if renderer_url:
@@ -197,7 +211,7 @@ def build_skill_state(
                         client.post(f"{renderer_url}/experiences", json=exp)
             except Exception:
                 pass
-        return {"ok": True, "person_id": person_id, "cards": cards}
+        return {"ok": True, "person_id": person_id, "cards": dashboard_state["cards"]}
 
     handlers: Dict[str, SkillHandler] = {
         "echo": handler_echo,
@@ -209,6 +223,7 @@ def build_skill_state(
         "person_enroll": handler_person_enroll,
         "person_verify": handler_person_verify,
         "person_update_prefs": handler_person_update_prefs,
+        "dashboard_refresh": handler_dashboard_refresh,
     }
 
     skills: Dict[str, SkillHandler] = {
