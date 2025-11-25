@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from .clients import ServiceClients
+from .services import evaluate_capability
 from .context_client import (
     load_conversation_messages,
     store_conversation_turn,
@@ -197,7 +198,7 @@ class CompanionSessionManager:
         tool_activity: List[Dict[str, Any]] = []
         final_body = body
         if tool_calls:
-            tool_messages, tool_activity = self._execute_tool_calls(tool_calls)
+            tool_messages, tool_activity = self._execute_tool_calls(tool_calls, person_id, event_id)
             followup_messages = list(prior_turns + messages)
             if body.get("messages"):
                 followup_messages.extend(body["messages"])
@@ -271,7 +272,9 @@ class CompanionSessionManager:
             logger.debug("context load failed: %s", exc)
         return []
 
-    def _execute_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def _execute_tool_calls(
+        self, tool_calls: List[Dict[str, Any]], person_id: str, event_id: str
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Execute tool calls; return tool result messages and activity metadata."""
         tool_messages: List[Dict[str, Any]] = []
         activity: List[Dict[str, Any]] = []
@@ -285,12 +288,16 @@ class CompanionSessionManager:
                 args_json = json.loads(arguments) if isinstance(arguments, str) else (arguments or {})
             except Exception:
                 args_json = {}
-            result = self._execute_single_tool(name, args_json)
+            allowed = self._policy_allows_tool(name or "unknown", person_id, event_id)
+            if not allowed:
+                result = {"error": "policy denied"}
+            else:
+                result = self._execute_single_tool(name, args_json, person_id, event_id)
             tool_messages.append({"role": "tool", "tool_call_id": call.get("id"), "name": name, "content": str(result)})
             activity.append({"tool": name, "status": "ok" if "error" not in str(result).lower() else "error", "result": result})
         return tool_messages, activity
 
-    def _execute_single_tool(self, name: Optional[str], arguments: Dict[str, Any]) -> Any:
+    def _execute_single_tool(self, name: Optional[str], arguments: Dict[str, Any], person_id: str, event_id: str) -> Any:
         """Very small executor for built-in tools; MCP tools are stubbed for now."""
         if not name:
             return {"error": "missing tool name"}
@@ -371,6 +378,25 @@ class CompanionSessionManager:
                     client.post(f"{_IO_SPEECH_URL}/speech/tts", json={"text": text}, headers=headers)
             except Exception as exc:
                 logger.debug("speech emit failed: %s", exc)
+
+    def _policy_allows_tool(self, name: str, person_id: str, event_id: str) -> bool:
+        """Consult policy service; allow on failure to avoid hard-stop but log."""
+        payload = {
+            "capability_id": f"tool.{name}",
+            "context": {
+                "actor": person_id,
+                "intent": "companion.tool",
+                "tool": name,
+            },
+        }
+        try:
+            ok, status, body = evaluate_capability(self._clients, payload, event_id=event_id)
+            if ok and isinstance(body, dict):
+                decision = body.get("decision", {})
+                return bool(decision.get("allowed", True))
+        except Exception as exc:
+            logger.debug("policy check failed: %s", exc)
+        return True
 
 
 def _first_assistant_content(messages: Optional[List[Dict[str, Any]]]) -> Optional[str]:
