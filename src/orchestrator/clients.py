@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from .config import ServiceEndpoints
+from unison_common.baton import get_current_baton
 from unison_common.http_client import (
     http_get_json_with_retry,
     http_post_json_with_retry,
@@ -22,11 +23,15 @@ class ServiceHttpClient:
     port: str
 
     def get(self, path: str, *, headers: Optional[Dict[str, str]] = None) -> HttpResult:
+        merged_headers = dict(headers or {})
+        baton = get_current_baton()
+        if baton:
+            merged_headers.setdefault("X-Context-Baton", baton)
         return http_get_json_with_retry(
             self.host,
             self.port,
             path,
-            headers=headers,
+            headers=merged_headers or None,
             **_CALL_DEFAULTS,
         )
 
@@ -37,12 +42,16 @@ class ServiceHttpClient:
         *,
         headers: Optional[Dict[str, str]] = None,
     ) -> HttpResult:
+        merged_headers = dict(headers or {})
+        baton = get_current_baton()
+        if baton:
+            merged_headers.setdefault("X-Context-Baton", baton)
         return http_post_json_with_retry(
             self.host,
             self.port,
             path,
             payload,
-            headers=headers,
+            headers=merged_headers or None,
             **_CALL_DEFAULTS,
         )
 
@@ -53,12 +62,16 @@ class ServiceHttpClient:
         *,
         headers: Optional[Dict[str, str]] = None,
     ) -> HttpResult:
+        merged_headers = dict(headers or {})
+        baton = get_current_baton()
+        if baton:
+            merged_headers.setdefault("X-Context-Baton", baton)
         return http_put_json_with_retry(
             self.host,
             self.port,
             path,
             payload,
-            headers=headers,
+            headers=merged_headers or None,
             **_CALL_DEFAULTS,
         )
 
