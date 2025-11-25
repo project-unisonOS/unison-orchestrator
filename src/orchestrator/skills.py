@@ -5,6 +5,8 @@ from typing import Any, Callable, Dict
 
 from .clients import ServiceClients
 from .companion import CompanionSessionManager, ToolRegistry
+import os
+import httpx
 
 SkillHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
 
@@ -159,6 +161,44 @@ def build_skill_state(
             return {"ok": True, "person_id": person_id}
         return {"ok": False, "error": f"context error {status2}"}
 
+    def handler_dashboard_refresh(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id")
+        if not person_id:
+            return {"ok": False, "error": "missing person_id"}
+        # Fetch existing profile to respect preferences (optional)
+        profile_ok, _, profile_body = service_clients.context.get(f"/profile/{person_id}")
+        prefs = {}
+        if profile_ok and isinstance(profile_body, dict):
+            prefs = (profile_body.get("profile") or {}).get("dashboard", {}).get("preferences", {})
+        # Build simple priority cards (stub)
+        cards = payload.get("cards")
+        if not cards:
+            cards = [
+                {
+                    "id": "dashboard-1",
+                    "type": "summary",
+                    "title": "Your morning briefing",
+                    "body": "Schedule, comms, and tasks summarized.",
+                }
+            ]
+        dashboard_state = {"cards": cards, "preferences": prefs, "person_id": person_id, "updated_at": time.time()}
+        # Persist to context
+        service_clients.context.post(f"/dashboard/{person_id}", {"dashboard": dashboard_state})
+        # Emit to renderer experiences if configured
+        renderer_url = os.getenv("UNISON_RENDERER_URL")
+        if renderer_url:
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    for card in cards:
+                        exp = dict(card)
+                        exp.setdefault("person_id", person_id)
+                        exp.setdefault("ts", time.time())
+                        client.post(f"{renderer_url}/experiences", json=exp)
+            except Exception:
+                pass
+        return {"ok": True, "person_id": person_id, "cards": cards}
+
     handlers: Dict[str, SkillHandler] = {
         "echo": handler_echo,
         "inference": handler_inference,
@@ -183,6 +223,7 @@ def build_skill_state(
         "person.enroll": handler_person_enroll,
         "person.verify": handler_person_verify,
         "person.update_prefs": handler_person_update_prefs,
+        "dashboard.refresh": handler_dashboard_refresh,
     }
 
     return {"skills": skills, "handlers": handlers}
