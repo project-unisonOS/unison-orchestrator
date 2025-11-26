@@ -163,6 +163,28 @@ def build_skill_state(
             return {"ok": True, "person_id": person_id}
         return {"ok": False, "error": f"context error {status2}"}
 
+    def handler_wakeword_update(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id")
+        wakeword = payload.get("wakeword") or payload.get("keyword") or ""
+        if not isinstance(person_id, str) or not person_id:
+            return {"ok": False, "error": "missing person_id"}
+        wakeword = str(wakeword).strip()
+        if not wakeword or len(wakeword.split()) > 3 or len(wakeword) > 24:
+            return {"ok": False, "error": "invalid wakeword"}
+        # Fetch existing profile to merge voice prefs
+        profile_ok, _, profile_body = service_clients.context.get(f"/profile/{person_id}")
+        profile = {}
+        if profile_ok and isinstance(profile_body, dict):
+            profile = profile_body.get("profile") or {}
+        voice = profile.get("voice") or {}
+        voice["wakeword"] = wakeword
+        profile["voice"] = voice
+        ok, status, _ = service_clients.context.post(f"/profile/{person_id}", {"profile": profile})
+        if not ok:
+            return {"ok": False, "error": f"context error {status}"}
+        return {"ok": True, "person_id": person_id, "wakeword": wakeword}
+
     def handler_dashboard_refresh(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
         person_id = payload.get("person_id")
@@ -224,6 +246,7 @@ def build_skill_state(
         "person_verify": handler_person_verify,
         "person_update_prefs": handler_person_update_prefs,
         "dashboard_refresh": handler_dashboard_refresh,
+        "wakeword_update": handler_wakeword_update,
     }
 
     skills: Dict[str, SkillHandler] = {
@@ -239,6 +262,7 @@ def build_skill_state(
         "person.verify": handler_person_verify,
         "person.update_prefs": handler_person_update_prefs,
         "dashboard.refresh": handler_dashboard_refresh,
+        "wakeword.update": handler_wakeword_update,
     }
 
-    return {"skills": skills, "handlers": handlers}
+    return {"skills": skills, "handlers": handlers, "companion_manager": companion_manager}

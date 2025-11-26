@@ -5,6 +5,7 @@ import os
 import uuid
 import httpx
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Optional downstream emitters for renderer/speech (best-effort)
 _RENDERER_URL = os.getenv("UNISON_RENDERER_URL")
 _IO_SPEECH_URL = os.getenv("UNISON_IO_SPEECH_URL")
+_CONTEXT_GRAPH_URL = os.getenv("UNISON_CONTEXT_GRAPH_URL")
 
 @dataclass
 class ToolDescriptor:
@@ -224,9 +226,14 @@ class CompanionSessionManager:
             else:
                 tool_activity.append({"tool": "inference_followup", "status": "error", "detail": f"status={status2}"})
 
+        extra_tool_activity = final_body.get("tool_activity") if isinstance(final_body, dict) else None
+        if isinstance(extra_tool_activity, list):
+            tool_activity.extend(extra_tool_activity)
         reply_text = final_body.get("result") or _first_assistant_content(final_body.get("messages"))
         self._remember_turn(person_id, session_id, messages, final_body, event_id)
-        self._emit_downstream(reply_text, tool_activity)
+        cards = final_body.get("cards") if isinstance(final_body, dict) else None
+        self._emit_downstream(reply_text, tool_activity, person_id, session_id, cards)
+        self._log_context_graph(person_id, session_id, reply_text, tool_activity, cards)
 
         return {
             "text": reply_text,
@@ -240,6 +247,7 @@ class CompanionSessionManager:
             "raw_response": final_body,
             "display_intent": {"text": reply_text, "images": []} if reply_text else None,
             "speak_intent": {"text": reply_text} if reply_text else None,
+            "wakeword": reply_text if payload.get("wakeword_command") else None,
         }
 
     def _remember_turn(
@@ -355,11 +363,26 @@ class CompanionSessionManager:
             return {"error": f"mcp discovery failed: {exc}"}
         return {"error": f"mcp tool {name} not found"}
 
-    def _emit_downstream(self, text: Optional[str], tool_activity: List[Dict[str, Any]]) -> None:
+    def _emit_downstream(
+        self,
+        text: Optional[str],
+        tool_activity: List[Dict[str, Any]],
+        person_id: str,
+        session_id: str,
+        cards: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         """Best-effort emit to renderer and IO speech if configured."""
         if not text:
             return
-        payload = {"text": text, "tool_activity": tool_activity}
+        payload = {
+            "text": text,
+            "tool_activity": tool_activity,
+            "person_id": person_id,
+            "session_id": session_id,
+            "ts": time.time(),
+        }
+        if cards:
+            payload["cards"] = cards
         headers = {}
         try:
             baton = None
@@ -370,18 +393,60 @@ class CompanionSessionManager:
         except Exception:
             pass
 
+        audio_url = None
+        if _IO_SPEECH_URL:
+            try:
+                with httpx.Client(timeout=3.0) as client:
+                    resp = client.post(
+                        f"{_IO_SPEECH_URL}/speech/tts",
+                        json={"text": text, "person_id": person_id, "session_id": session_id},
+                        headers=headers or None,
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+                audio_url = data.get("audio_url")
+            except Exception as exc:
+                logger.debug("speech emit failed: %s", exc)
+        if audio_url:
+            payload["audio_url"] = audio_url
+
         if _RENDERER_URL:
             try:
                 with httpx.Client(timeout=2.0) as client:
-                    client.post(f"{_RENDERER_URL}/display", json=payload, headers=headers)
+                    client.post(f"{_RENDERER_URL}/experiences", json=payload, headers=headers or None)
             except Exception as exc:
                 logger.debug("renderer emit failed: %s", exc)
-        if _IO_SPEECH_URL:
-            try:
-                with httpx.Client(timeout=2.0) as client:
-                    client.post(f"{_IO_SPEECH_URL}/speech/tts", json={"text": text}, headers=headers)
-            except Exception as exc:
-                logger.debug("speech emit failed: %s", exc)
+
+    def _log_context_graph(
+        self,
+        person_id: str,
+        session_id: str,
+        transcript: Optional[str],
+        tool_activity: List[Dict[str, Any]],
+        cards: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Best-effort logging of turns/tool calls into context-graph."""
+        if not _CONTEXT_GRAPH_URL:
+            return
+        body = {
+            "user_id": person_id,
+            "session_id": session_id,
+            "dimensions": [
+                {
+                    "name": "conversation",
+                    "value": {
+                        "transcript": transcript or "",
+                        "tool_activity": tool_activity or [],
+                        "cards": cards or [],
+                    },
+                }
+            ],
+        }
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                client.post(f"{_CONTEXT_GRAPH_URL}/context/update", json=body)
+        except Exception as exc:
+            logger.debug("context-graph emit failed: %s", exc)
 
     def _policy_allows_tool(self, name: str, person_id: str, event_id: str) -> bool:
         """Consult policy service; allow on failure to avoid hard-stop but log."""

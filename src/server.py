@@ -12,6 +12,8 @@ from orchestrator import OrchestratorSettings, ServiceClients, instrument_fastap
 from orchestrator.api import register_event_routes
 from orchestrator.api.admin import register_admin_routes
 from orchestrator.api.skills import register_skill_routes
+from orchestrator.api.voice import register_voice_routes
+from orchestrator.api.payments import register_payment_routes
 from orchestrator.replay import configure_replay_store, register_replay_routes
 from orchestrator.skills import build_skill_state
 from unison_common import (
@@ -58,6 +60,7 @@ if "testserver" not in settings.allowed_hosts:
     settings.allowed_hosts.append("testserver")
 endpoints = settings.endpoints
 service_clients = ServiceClients.from_endpoints(endpoints)
+app.state.service_clients = service_clients
 CONTEXT_HOST = endpoints.context_host
 CONTEXT_PORT = endpoints.context_port
 STORAGE_HOST = endpoints.storage_host
@@ -165,6 +168,7 @@ router = Router(RoutingStrategy(settings.routing_strategy))
 skill_state = build_skill_state(service_clients)
 _skills: Dict[str, Any] = skill_state["skills"]
 _skill_handlers = skill_state["handlers"]
+_companion_manager = skill_state.get("companion_manager")
 
 # Legacy helper expected in tests; routes use ServiceClients for HTTP calls.
 def http_post_json(host, port, path, payload, headers=None):
@@ -208,6 +212,16 @@ register_event_routes(
     prune_pending=_prune_pending,
     endpoints=endpoints,
 )
+if _companion_manager:
+    register_voice_routes(
+        app,
+        companion_manager=_companion_manager,
+        service_clients=service_clients,
+        metrics=_metrics,
+    )
+
+# Payments API (Phase 1 mock provider)
+_payment_service = register_payment_routes(app, metrics=_metrics, service_clients=service_clients)
 
 # Apply dependency override after routes are registered to ensure test clients bypass auth.
 if os.getenv("DISABLE_AUTH_FOR_TESTS", "true").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
