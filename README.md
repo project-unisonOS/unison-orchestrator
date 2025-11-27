@@ -2,6 +2,9 @@
 
 The orchestrator is the central decision layer for the Unison system, coordinating communication between all modules and managing event flow.
 
+## Status
+Core service (active) — gateway for intents; devstack port `8090`.
+
 ## Purpose
 
 The orchestrator service:
@@ -55,7 +58,7 @@ python src/server.py
 ```bash
 # Using the development stack
 cd ../unison-devstack
-docker-compose up -d orchestrator
+docker compose up -d orchestrator
 
 # Health check
 curl http://localhost:8080/health
@@ -65,7 +68,7 @@ curl http://localhost:8080/health
 ```bash
 # Using the security configuration
 cd ../unison-devstack
-docker-compose -f docker-compose.security.yml up -d
+docker compose -f docker-compose.security.yml up -d
 
 # Access through API gateway
 curl https://localhost/api/health
@@ -96,11 +99,14 @@ curl -X POST http://localhost:8080/event \
   -d '{"intent": "echo", "payload": {"message": "Hello World"}}'
 ```
 
-[Full API Documentation](../../unison-docs/developer/api-reference/orchestrator.md)
+Additional docs: workspace `docs/unison-architecture-overview.md` and `docs/developer-guide.md` cover how this service
+fits into the platform; legacy `unison-docs` references are archived.
 
 ## Configuration
 
 ### Environment Variables
+Copy `.env.example` and adjust for your environment.
+
 ```bash
 # Service Configuration
 UNISON_CONTEXT_HOST=context          # Context service host
@@ -138,17 +144,9 @@ LOG_LEVEL=DEBUG python src/server.py
 
 ### Testing
 ```bash
-# Unit tests
-pytest tests/unit/
-
-# Integration tests
-pytest tests/integration/
-
-# Security tests
-pytest tests/security/
-
-# Load testing
-locust -f tests/load/locustfile.py
+python3 -m venv .venv && . .venv/bin/activate
+pip install -c ../constraints.txt -r requirements.txt
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 ```
 
 ### Contributing
@@ -157,8 +155,6 @@ locust -f tests/load/locustfile.py
 3. Make your changes with tests
 4. Ensure all tests pass and code follows style guidelines
 5. Submit a pull request with description
-
-[Development Guide](../../unison-docs/developer/contributing.md)
 
 ## Security
 
@@ -178,8 +174,6 @@ locust -f tests/load/locustfile.py
 - HTTP Strict Transport Security (HSTS)
 - X-Frame-Options, X-Content-Type-Options
 - CORS configuration
-
-[Security Documentation](../../unison-docs/operations/security.md)
 
 ## Architecture
 
@@ -204,8 +198,6 @@ The orchestrator follows a modular architecture:
                        └──────────────────┘
 ```
 
-[Architecture Documentation](../../unison-docs/developer/architecture.md)
-
 ## Monitoring
 
 ### Health Checks
@@ -228,8 +220,6 @@ Key metrics available:
 - Event processing latency
 - Policy decision statistics
 - Error rates by type
-
-[Monitoring Guide](../../unison-docs/operations/monitoring.md)
 
 ## Related Services
 
@@ -289,8 +279,6 @@ LOG_LEVEL=DEBUG UNISON_DEBUG_AUTH=true python src/server.py
 curl http://localhost:8080/ready
 ```
 
-[Troubleshooting Guide](../../unison-docs/user/troubleshooting.md)
-
 ## Version Compatibility
 
 | Orchestrator Version | Unison Common | Auth Service | Minimum Docker |
@@ -300,13 +288,19 @@ curl http://localhost:8080/ready
 
 [Compatibility Matrix](../../unison-spec/specs/version-compatibility.md)
 
+## Testing
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -c ../constraints.txt -r requirements.txt
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
+```
+
 ## License
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 ## Support
 
-- **Documentation**: [Project Unison Docs](https://github.com/project-unisonOS/unison-docs)
 - **Issues**: [GitHub Issues](https://github.com/project-unisonOS/unison-orchestrator/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/project-unisonOS/unison-orchestrator/discussions)
-- **Security**: Report security issues to security@unisonos.org
+- **Security**: Report security issues to [security@unisonos.org](mailto:security@unisonos.org)
