@@ -21,6 +21,8 @@ class ServiceEndpoints:
     policy_port: str = "8083"
     inference_host: str = "inference"
     inference_port: str = "8087"
+    payments_host: str | None = None
+    payments_port: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,8 @@ class OrchestratorSettings:
             policy_port=os.getenv("UNISON_POLICY_PORT", "8083"),
             inference_host=os.getenv("UNISON_INFERENCE_HOST", "inference"),
             inference_port=os.getenv("UNISON_INFERENCE_PORT", "8087"),
+            payments_host=os.getenv("UNISON_PAYMENTS_HOST") or None,
+            payments_port=os.getenv("UNISON_PAYMENTS_PORT") or None,
         )
 
         return cls(

@@ -82,12 +82,17 @@ class ServiceClients:
     storage: ServiceHttpClient
     policy: ServiceHttpClient
     inference: ServiceHttpClient
+    payments: ServiceHttpClient | None = None
 
     @classmethod
     def from_endpoints(cls, endpoints: ServiceEndpoints) -> "ServiceClients":
+        payments_client = None
+        if endpoints.payments_host and endpoints.payments_port:
+            payments_client = ServiceHttpClient(endpoints.payments_host, endpoints.payments_port)
         return cls(
             context=ServiceHttpClient(endpoints.context_host, endpoints.context_port),
             storage=ServiceHttpClient(endpoints.storage_host, endpoints.storage_port),
             policy=ServiceHttpClient(endpoints.policy_host, endpoints.policy_port),
             inference=ServiceHttpClient(endpoints.inference_host, endpoints.inference_port),
+            payments=payments_client,
         )

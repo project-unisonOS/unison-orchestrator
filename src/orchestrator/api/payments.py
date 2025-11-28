@@ -48,6 +48,13 @@ class PaymentTransactionPayload(BaseModel):
     surface: str | None = Field(default=None, description="Requesting surface (voice, text, app)")
 
 
+def _proxy_error(ok: bool, status: int, body: Any, default_message: str):
+    if ok and status < 300:
+        return
+    detail = body if isinstance(body, str) else (body.get("detail") if isinstance(body, dict) else default_message)
+    raise HTTPException(status_code=status or 502, detail=detail or default_message)
+
+
 def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) -> PaymentService:
     api = APIRouter()
     provider_name = os.getenv("UNISON_PAYMENTS_PROVIDER", "mock")
@@ -67,6 +74,7 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
             )
     context_client = getattr(service_clients, "context", None)
     storage_client = getattr(service_clients, "storage", None)
+    payments_client = getattr(service_clients, "payments", None)
 
     service = PaymentService(
         provider,
@@ -82,6 +90,10 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
         consent=Depends(require_consent([ConsentScopes.INGEST_WRITE])) if _require_payments_consent else None,
     ):
         metrics["/payments/instruments"] += 1
+        if payments_client:
+            ok, status, body = payments_client.post("/payments/instruments", payload.model_dump())
+            _proxy_error(ok, status, body, "payments service error")
+            return body
         instrument = PaymentInstrument(
             instrument_id=str(uuid.uuid4()),
             person_id=payload.person_id,
@@ -126,6 +138,10 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
         except Exception as exc:
             logging.getLogger(__name__).warning("policy evaluation failed, default deny: %s", exc)
             raise HTTPException(status_code=403, detail="policy denied payment")
+        if payments_client:
+            ok, status, body = payments_client.post("/payments/transactions", payload.model_dump())
+            _proxy_error(ok, status, body, "payments service error")
+            return body
         request = PaymentTransactionRequest(
             person_id=payload.person_id,
             instrument_id=payload.instrument_id,
@@ -145,6 +161,10 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
         current_user: Dict[str, Any] = Depends(_auth_dependency()),
     ):
         metrics["/payments/transactions"] += 1
+        if payments_client:
+            ok, status, body = payments_client.get(f"/payments/transactions/{txn_id}")
+            _proxy_error(ok, status, body, "payments service error")
+            return body
         try:
             txn = service.get_transaction_status(txn_id)
         except KeyError:
@@ -166,6 +186,10 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
             payload["_raw_body"] = raw_body.decode("utf-8")
         signature = request.headers.get("X-Payments-Signature") or request.headers.get("X-Signature")
         payload["_signature"] = signature
+        if payments_client:
+            ok, status, body = payments_client.post(f"/payments/webhooks/{provider}", payload)
+            _proxy_error(ok, status, body, "payments service error")
+            return body
         try:
             txn = service.process_webhook(provider, payload)
         except ValueError:
