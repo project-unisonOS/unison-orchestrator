@@ -91,7 +91,10 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
     ):
         metrics["/payments/instruments"] += 1
         if payments_client:
-            ok, status, body = payments_client.post("/payments/instruments", payload.model_dump())
+            payload_dict = payload.model_dump()
+            baton = current_user.get("baton")
+            headers = {"X-Context-Baton": baton} if baton else None
+            ok, status, body = payments_client.post("/payments/instruments", payload_dict, headers=headers)
             _proxy_error(ok, status, body, "payments service error")
             return body
         instrument = PaymentInstrument(
@@ -139,7 +142,10 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
             logging.getLogger(__name__).warning("policy evaluation failed, default deny: %s", exc)
             raise HTTPException(status_code=403, detail="policy denied payment")
         if payments_client:
-            ok, status, body = payments_client.post("/payments/transactions", payload.model_dump())
+            payload_dict = payload.model_dump()
+            baton = current_user.get("baton")
+            headers = {"X-Context-Baton": baton} if baton else None
+            ok, status, body = payments_client.post("/payments/transactions", payload_dict, headers=headers)
             _proxy_error(ok, status, body, "payments service error")
             return body
         request = PaymentTransactionRequest(
@@ -162,7 +168,9 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
     ):
         metrics["/payments/transactions"] += 1
         if payments_client:
-            ok, status, body = payments_client.get(f"/payments/transactions/{txn_id}")
+            baton = current_user.get("baton")
+            headers = {"X-Context-Baton": baton} if baton else None
+            ok, status, body = payments_client.get(f"/payments/transactions/{txn_id}", headers=headers)
             _proxy_error(ok, status, body, "payments service error")
             return body
         try:
