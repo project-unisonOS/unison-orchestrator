@@ -39,20 +39,11 @@ PendingConfirms = MutableMapping[str, Dict[str, Any]]
 
 def _auth_dependency():
     """Return a test user when auth is disabled, otherwise defer to verify_token."""
-    async def _test_user():
-        return {"username": "test-user", "roles": ["admin"]}
-
-    async def _auth_with_fallback():
-        if os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
-            return await _test_user()
-        try:
-            return await verify_token()
-        except HTTPException as exc:
-            if os.getenv("PYTEST_CURRENT_TEST"):
-                return await _test_user()
-            raise exc
-
-    return _auth_with_fallback
+    if os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
+        async def _test_user():
+            return {"username": "test-user", "roles": ["admin"]}
+        return _test_user
+    return verify_token
 
 
 def _ingest_consent_dependency(require_consent_flag: bool):
