@@ -235,6 +235,69 @@ def build_skill_state(
                 pass
         return {"ok": True, "person_id": person_id, "cards": dashboard_state["cards"]}
 
+    def handler_caps_report(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload") or {}
+        person_id = payload.get("person_id") or "local-user"
+        caps = payload.get("caps") or {}
+        if not isinstance(caps, dict):
+            return {"ok": False, "error": "invalid-caps"}
+        key = f"caps:{person_id}"
+        ok, status, _ = service_clients.context.post("/kv/set", {"key": key, "value": caps})
+        if not ok:
+            return {"ok": False, "error": f"context error {status}", "person_id": person_id}
+        return {"ok": True, "person_id": person_id, "key": key, "caps": caps}
+
+    def _load_caps(person_id: str) -> Dict[str, Any]:
+        caps = {}
+        ok, _, body = service_clients.context.post("/kv/get", {"keys": [f"caps:{person_id}"]})
+        if ok and isinstance(body, dict):
+            caps = (body.get("values") or {}).get(f"caps:{person_id}") or {}
+        if not isinstance(caps, dict):
+            caps = {}
+        return caps
+
+    def _pick_locale(person_id: str, locale_hint: str | None = None) -> str:
+        if locale_hint and isinstance(locale_hint, str) and locale_hint.strip():
+            return locale_hint.strip()
+        ok, _, body = service_clients.context.get(f"/profile/{person_id}")
+        if ok and isinstance(body, dict):
+            profile = body.get("profile") or {}
+            locale = profile.get("locale") or profile.get("language")
+            if isinstance(locale, str) and locale.strip():
+                return locale.strip()
+        env_locale = os.getenv("UNISON_LOCALE_HINT") or os.getenv("LANG") or ""
+        return (env_locale or "en-US").split(".")[0]
+
+    def handler_startup_prompt_plan(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload") or {}
+        person_id = payload.get("person_id") or "local-user"
+        caps_payload = payload.get("caps") if isinstance(payload.get("caps"), dict) else None
+        locale_hint = payload.get("locale_hint")
+        caps = caps_payload or _load_caps(person_id)
+        audio_present = bool(isinstance(caps.get("audio_in"), dict) and caps.get("audio_in", {}).get("present", False))
+        audio_out = bool(isinstance(caps.get("audio_out"), dict) and caps.get("audio_out", {}).get("present", False))
+        display_present = bool(isinstance(caps.get("display"), dict) and caps.get("display", {}).get("present", False))
+        camera_present = bool(isinstance(caps.get("camera"), dict) and caps.get("camera", {}).get("present", False))
+        mode = "display_voice" if display_present and audio_present and audio_out else "voice_only"
+        locale = _pick_locale(person_id, locale_hint)
+        inference_ready, _, inference_body = service_clients.inference.get("/ready")
+        return {
+            "ok": True,
+            "person_id": person_id,
+            "mode": mode,
+            "locale": locale,
+            "caps": caps,
+            "camera_present": camera_present,
+            "display_present": display_present,
+            "audio_in_present": audio_present,
+            "audio_out_present": audio_out,
+            "prompts": {
+                "voice": f"Hi, I'm Unison. I can help in {locale}. Which language do you prefer?",
+                "display": "Welcome to Unison. Select your language or speak now." if display_present else None,
+            },
+            "inference_ready": bool(inference_ready and isinstance(inference_body, dict) and inference_body.get("ready", True)),
+        }
+
     handlers: Dict[str, SkillHandler] = {
         "echo": handler_echo,
         "inference": handler_inference,
@@ -247,6 +310,8 @@ def build_skill_state(
         "person_update_prefs": handler_person_update_prefs,
         "dashboard_refresh": handler_dashboard_refresh,
         "wakeword_update": handler_wakeword_update,
+        "caps_report": handler_caps_report,
+        "startup_prompt_plan": handler_startup_prompt_plan,
     }
 
     skills: Dict[str, SkillHandler] = {
@@ -263,6 +328,8 @@ def build_skill_state(
         "person.update_prefs": handler_person_update_prefs,
         "dashboard.refresh": handler_dashboard_refresh,
         "wakeword.update": handler_wakeword_update,
+        "caps.report": handler_caps_report,
+        "startup.prompt.plan": handler_startup_prompt_plan,
     }
 
     return {"skills": skills, "handlers": handlers, "companion_manager": companion_manager}
