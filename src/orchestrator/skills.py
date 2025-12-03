@@ -285,6 +285,56 @@ def build_skill_state(
             except Exception:
                 # Renderer emit failures are non-fatal
                 pass
+        # Best-effort logging of dashboard refresh into context-graph for later recall.
+        context_graph_url = os.getenv("UNISON_CONTEXT_GRAPH_URL") or os.getenv("UNISON_CONTEXT_GRAPH_BASE_URL")
+        if context_graph_url:
+            try:
+                created_at = dashboard_state.get("updated_at", time.time())
+                cards_for_log = dashboard_state.get("cards") or []
+                if not isinstance(cards_for_log, list):
+                    cards_for_log = []
+                tag_set = set()
+                for card in cards_for_log:
+                    if not isinstance(card, dict):
+                        continue
+                    for t in card.get("tags") or []:
+                        if isinstance(t, str):
+                            tag_set.add(t)
+                tags = list(tag_set)
+                body = {
+                    "user_id": person_id,
+                    "session_id": "",  # dashboard refresh is not tied to a single conversation session
+                    "dimensions": [
+                        {
+                            "name": "dashboard",
+                            "value": {
+                                "cards": cards_for_log,
+                                "origin_intent": "dashboard.refresh",
+                                "tags": tags,
+                                "created_at": created_at,
+                            },
+                        }
+                    ],
+                }
+                with httpx.Client(timeout=2.0) as client:
+                    client.post(f"{context_graph_url}/context/update", json=body)
+                    trace_body = {
+                        "user_id": person_id,
+                        "trace": [
+                            {
+                                "event": "dashboard.refresh",
+                                "metadata": {
+                                    "cards": cards_for_log,
+                                    "tags": tags,
+                                    "created_at": created_at,
+                                },
+                            }
+                        ],
+                    }
+                    client.post(f"{context_graph_url}/traces/replay", json=trace_body)
+            except Exception:
+                # Context-graph emit failures are non-fatal and should not break dashboard refresh.
+                pass
         return {"ok": True, "person_id": person_id, "cards": dashboard_state["cards"]}
 
     def handler_workflow_design(envelope: Dict[str, Any]) -> Dict[str, Any]:
