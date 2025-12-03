@@ -22,7 +22,7 @@ def register_voice_routes(
     @api.post("/voice/ingest")
     def voice_ingest(
         body: Dict[str, Any] = Body(...),
-        current_user: Dict[str, Any] = Depends(_auth_dependency()),
+        current_user: Dict[str, Any] = Depends(_auth_dependency),
     ):
         """Ingest STT transcripts from io-speech and trigger a companion turn."""
         metrics["/voice/ingest"] += 1

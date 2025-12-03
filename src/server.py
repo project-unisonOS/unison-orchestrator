@@ -34,7 +34,7 @@ from unison_common import (
     verify_consent_grant,
     verify_service_token,
 )
-from unison_common.auth import rate_limit, verify_token
+from unison_common.auth import rate_limit
 from unison_common.idempotency import IdempotencyConfig, IdempotencyManager, get_idempotency_manager
 from unison_common.idempotency_middleware import IdempotencyKeyRequiredMiddleware, IdempotencyMiddleware
 from unison_common.logging import configure_logging
@@ -91,17 +91,6 @@ logger.info("P0.3: Tracing middleware enabled")
 # Context baton validation (optional; only enforces signature/expiry if header is present)
 app.add_middleware(BatonMiddleware)
 logger.info("Context baton middleware enabled (optional validation)")
-
-# Test-friendly auth override (used when running tests; default enabled for TestClient usage)
-if os.getenv("DISABLE_AUTH_FOR_TESTS", "true").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
-    import unison_common.auth as _auth
-
-    async def _test_user():
-        return {"username": "test-user", "roles": ["admin"]}
-
-    _auth.verify_token = _test_user
-    verify_token = _test_user
-    app.dependency_overrides[verify_token] = _test_user
 
 # Multimodal capabilities
 try:
@@ -222,10 +211,6 @@ if _companion_manager:
 
 # Payments API (Phase 1 mock provider)
 _payment_service = register_payment_routes(app, metrics=_metrics, service_clients=service_clients)
-
-# Apply dependency override after routes are registered to ensure test clients bypass auth.
-if os.getenv("DISABLE_AUTH_FOR_TESTS", "true").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
-    app.dependency_overrides[verify_token] = _test_user
 
 register_replay_routes(app)
 

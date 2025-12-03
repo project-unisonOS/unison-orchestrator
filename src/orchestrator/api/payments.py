@@ -16,8 +16,8 @@ from ..payments import (
     PaymentEventLogger,
     PaymentProvider,
 )
-from .routes import _auth_dependency
 from ..policy_client import evaluate_capability
+from .routes import _auth_dependency
 from unison_common.consent import require_consent, ConsentScopes
 
 _require_payments_consent = os.getenv("UNISON_REQUIRE_PAYMENTS_CONSENT", "false").lower() in {"1", "true", "yes", "on"}
@@ -86,7 +86,7 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
     @api.post("/payments/instruments")
     def register_instrument(
         payload: PaymentInstrumentPayload = Body(...),
-        current_user: Dict[str, Any] = Depends(_auth_dependency()),
+        current_user: Dict[str, Any] = Depends(_auth_dependency),
         consent=Depends(require_consent([ConsentScopes.INGEST_WRITE])) if _require_payments_consent else None,
     ):
         metrics["/payments/instruments"] += 1
@@ -115,7 +115,7 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
     @api.post("/payments/transactions")
     def create_transaction(
         payload: PaymentTransactionPayload = Body(...),
-        current_user: Dict[str, Any] = Depends(_auth_dependency()),
+        current_user: Dict[str, Any] = Depends(_auth_dependency),
         consent=Depends(require_consent([ConsentScopes.INGEST_WRITE])) if _require_payments_consent else None,
     ):
         metrics["/payments/transactions"] += 1
@@ -164,7 +164,7 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
     @api.get("/payments/transactions/{txn_id}")
     def get_transaction_status(
         txn_id: str,
-        current_user: Dict[str, Any] = Depends(_auth_dependency()),
+        current_user: Dict[str, Any] = Depends(_auth_dependency),
     ):
         metrics["/payments/transactions"] += 1
         if payments_client:

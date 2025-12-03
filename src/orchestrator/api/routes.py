@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
-import os
 from datetime import datetime
 from typing import Any, Callable, Dict, MutableMapping, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from opentelemetry import trace
 
 from ..clients import ServiceClients
@@ -35,24 +36,59 @@ from unison_common.replay_endpoints import store_processing_envelope
 Skill = Callable[[Dict[str, Any]], Dict[str, Any]]
 SkillsRegistry = Dict[str, Skill]
 PendingConfirms = MutableMapping[str, Dict[str, Any]]
+_security = HTTPBearer(auto_error=False)
 
 
-def _auth_dependency():
-    """Return a test user when auth is disabled, otherwise defer to verify_token."""
-    if os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
-        async def _test_user():
-            return {"username": "test-user", "roles": ["admin"]}
-        return _test_user
-    return verify_token
+async def _auth_dependency(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_security),
+) -> Dict[str, Any]:
+    """
+    Authentication dependency used by orchestrator HTTP routes.
+
+    Behaviour:
+    - If tests have overridden ``verify_token`` on the app, honor that.
+    - In test mode (pytest) or when ``DISABLE_AUTH_FOR_TESTS`` is set,
+      allow requests without credentials and return a fixed test user.
+    - Otherwise, delegate to the shared ``verify_token`` helper.
+    """
+    # Honor explicit dependency overrides first (used in tests).
+    overrides = getattr(request.app, "dependency_overrides", {})
+    override_dep = overrides.get(verify_token)
+    if override_dep is not None:
+        result = override_dep()
+        if hasattr(result, "__await__"):
+            result = await result  # type: ignore[assignment]
+        return result  # type: ignore[return-value]
+
+    test_mode = bool(os.getenv("PYTEST_CURRENT_TEST")) or os.getenv(
+        "DISABLE_AUTH_FOR_TESTS", "false"
+    ).lower() == "true"
+
+    # In test mode, allow missing credentials and return a synthetic user.
+    if test_mode and credentials is None:
+        return {"username": "test-user", "roles": ["admin"]}
+
+    # Normal path: delegate to the shared auth helper.
+    return await verify_token(credentials)  # type: ignore[arg-type]
 
 
 def _ingest_consent_dependency(require_consent_flag: bool):
+    """
+    Return a dependency that enforces INGEST_WRITE consent when required.
+
+    When consent is required, we delegate to the shared
+    ``require_consent`` helper so that behaviour is consistent across
+    services. When consent is not required, we return a no-op
+    dependency that always yields ``None``.
+    """
     if not require_consent_flag:
         async def _optional_consent():
             return None
 
         return Depends(_optional_consent)
 
+    # Strict consent enforcement when enabled.
     return Depends(require_consent([ConsentScopes.INGEST_WRITE]))
 
 
@@ -74,7 +110,7 @@ def register_event_routes(
     @api.post("/event")
     async def handle_event(
         envelope: dict = Body(...),
-        current_user: Dict[str, Any] = Depends(_auth_dependency()),
+        current_user: Dict[str, Any] = Depends(_auth_dependency),
     ):
         metrics["/event"] += 1
 
@@ -318,7 +354,7 @@ def register_event_routes(
 
     @api.post("/ingest")
     async def ingest_m4(
-        body: Dict[str, Any],
+        body: Dict[str, Any] = Body(...),
         current_user: Dict[str, Any] = Depends(verify_token),
         consent_grant: Optional[Dict[str, Any]] = consent_dependency,
     ):
