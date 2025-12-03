@@ -710,26 +710,6 @@ def apply_workflow_design(
         except Exception as exc:
             logger.debug("context-graph emit failed: %s", exc)
 
-    def _policy_allows_tool(self, name: str, person_id: str, event_id: str) -> bool:
-        """Consult policy service; allow on failure to avoid hard-stop but log."""
-        payload = {
-            "capability_id": f"tool.{name}",
-            "context": {
-                "actor": person_id,
-                "intent": "companion.tool",
-                "tool": name,
-            },
-        }
-        try:
-            ok, status, body = evaluate_capability(self._clients, payload, event_id=event_id)
-            if ok and isinstance(body, dict):
-                decision = body.get("decision", {})
-                return bool(decision.get("allowed", True))
-        except Exception as exc:
-            logger.debug("policy check failed: %s", exc)
-        return True
-
-
 def recall_workflow_from_dashboard(
     service_clients: ServiceClients,
     person_id: str,
@@ -857,3 +837,155 @@ def _first_assistant_content(messages: Optional[List[Dict[str, Any]]]) -> Option
         if msg.get("role") == "assistant":
             return msg.get("content")
     return None
+
+
+def _policy_allows_tool_impl(self, name: str, person_id: str, event_id: str) -> bool:
+    """Consult policy service; allow on failure to avoid hard-stop but log.
+
+    This implementation is attached to CompanionSessionManager at import time
+    to ensure the attribute exists even if earlier refactors moved helpers
+    around. It mirrors the original behavior.
+    """
+    payload: Dict[str, Any] = {
+        "capability_id": f"tool.{name}",
+        "context": {
+            "actor": person_id,
+            "intent": "companion.tool",
+            "tool": name,
+        },
+    }
+    try:
+        ok, status, body = evaluate_capability(self._clients, payload, event_id=event_id)
+        if ok and isinstance(body, dict):
+            decision = body.get("decision", {})
+            return bool(decision.get("allowed", True))
+    except Exception as exc:
+        logger.debug("policy check failed: %s", exc)
+    return True
+
+
+def _emit_downstream_impl(
+    self,
+    text: Optional[str],
+    tool_activity: List[Dict[str, Any]],
+    person_id: str,
+    session_id: str,
+    cards: Optional[List[Dict[str, Any]]] = None,
+    origin_intent: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    created_at: Optional[float] = None,
+) -> None:
+    """Best-effort emit to renderer and IO speech if configured."""
+    if not text:
+        return
+    ts = created_at or time.time()
+    payload: Dict[str, Any] = {
+        "text": text,
+        "tool_activity": tool_activity,
+        "person_id": person_id,
+        "session_id": session_id,
+        "ts": ts,
+    }
+    if cards:
+        payload["cards"] = cards
+    if origin_intent:
+        payload["origin_intent"] = origin_intent
+    if tags:
+        payload["tags"] = tags
+    headers: Dict[str, str] = {}
+    try:
+        baton = None
+        from unison_common.baton import get_current_baton  # type: ignore
+
+        baton = get_current_baton()
+        if baton:
+            headers["X-Context-Baton"] = baton
+    except Exception:
+        pass
+
+    audio_url = None
+    if _IO_SPEECH_URL:
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                resp = client.post(
+                    f"{_IO_SPEECH_URL}/speech/tts",
+                    json={"text": text, "person_id": person_id, "session_id": session_id},
+                    headers=headers or None,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            audio_url = data.get("audio_url")
+        except Exception as exc:
+            logger.debug("speech emit failed: %s", exc)
+    if audio_url:
+        payload["audio_url"] = audio_url
+
+    if _RENDERER_URL:
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                client.post(f"{_RENDERER_URL}/experiences", json=payload, headers=headers or None)
+        except Exception as exc:
+            logger.debug("renderer emit failed: %s", exc)
+
+
+def _log_context_graph_impl(
+    self,
+    person_id: str,
+    session_id: str,
+    transcript: Optional[str],
+    tool_activity: List[Dict[str, Any]],
+    cards: Optional[List[Dict[str, Any]]] = None,
+    origin_intent: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    created_at: Optional[float] = None,
+) -> None:
+    """Best-effort logging of turns/tool calls into context-graph."""
+    if not _CONTEXT_GRAPH_URL:
+        return
+    body: Dict[str, Any] = {
+        "user_id": person_id,
+        "session_id": session_id,
+        "dimensions": [
+            {
+                "name": "conversation",
+                "value": {
+                    "transcript": transcript or "",
+                    "tool_activity": tool_activity or [],
+                    "cards": cards or [],
+                },
+            }
+        ],
+    }
+    value = body["dimensions"][0]["value"]
+    if origin_intent:
+        value["origin_intent"] = origin_intent
+    if tags:
+        value["tags"] = tags
+    if created_at is not None:
+        value["created_at"] = created_at
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            # Maintain existing state-style update.
+            client.post(f"{_CONTEXT_GRAPH_URL}/context/update", json=body)
+            # Also record a trace event for future search.
+            event_meta = dict(value)
+            event_meta.setdefault("session_id", session_id)
+            trace_body = {
+                "user_id": person_id,
+                "trace": [
+                    {
+                        "event": origin_intent or "conversation.turn",
+                        "metadata": event_meta,
+                    }
+                ],
+            }
+            client.post(f"{_CONTEXT_GRAPH_URL}/traces/replay", json=trace_body)
+    except Exception as exc:
+        logger.debug("context-graph emit failed: %s", exc)
+
+
+# Attach helpers to the CompanionSessionManager class so attributes are present
+# even if earlier refactors moved the original method definitions.
+CompanionSessionManager._policy_allows_tool = _policy_allows_tool_impl  # type: ignore[attr-defined]
+CompanionSessionManager._emit_downstream = _emit_downstream_impl  # type: ignore[attr-defined]
+CompanionSessionManager._log_context_graph = _log_context_graph_impl  # type: ignore[attr-defined]
