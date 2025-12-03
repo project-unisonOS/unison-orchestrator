@@ -33,10 +33,18 @@ The orchestrator service:
 - Real-time event streaming
 - Performance optimization and caching
 
-### 📋 Planned
+### 📎 Planned
 - Workflow orchestration engine
 - Event replay and recovery
 - Advanced monitoring and metrics
+
+## Dashboard and Operating Surface
+
+The orchestrator participates directly in the UnisonOS Operating Surface by composing and refreshing a per-person dashboard:
+
+- **Dashboard refresh skill**: The `dashboard.refresh` skill reads the person’s profile and current dashboard state from `unison-context`, composes a small set of priority cards (for example, morning briefing, communications, active workflows, tasks), persists the merged dashboard back via `POST /dashboard/{person_id}`, and emits experiences to the renderer (when `UNISON_RENDERER_URL` is configured).
+- **Workflow design and recall**: The `workflow.design` and `workflow.recall` skills use the dashboard as a home for workflow summary cards and, when available, context-graph traces for richer recall (for example, “remind me about that workflow we were designing”).
+- **Edge-first by default**: All dashboard and workflow state is stored on-device in `unison-context` and `unison-context-graph`. Any cloud or remote sinks must be explicitly configured and governed by policy; there are no hidden cloud dependencies in these flows.
 
 ## Quick Start
 
@@ -180,22 +188,22 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 The orchestrator follows a modular architecture:
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   I/O Modules   │───▶│   Orchestrator   │───▶│  Skills/Gen     │
-│ (speech, vision)│    │   (Decision)     │    │    Services     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                │
-                                ▼
-                       ┌──────────────────┐
-                       │   Policy Engine  │
-                       │ (Safety/Authz)   │
-                       └──────────────────┘
-                                │
-                                ▼
-                       ┌──────────────────┐
-                       │  Context Store   │
-                       │ (User State)     │
-                       └──────────────────┘
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│   I/O Modules │───▶│   Orchestrator│───▶│  Skills/Gen   │
+│ (speech,vision)│   │   (Decision)  │    │   Services    │
+└───────────────┘    └───────────────┘    └───────────────┘
+                               │
+                               ▼
+                      ┌─────────────────────┐
+                      │   Policy Engine     │
+                      │   (Safety/Authz)    │
+                      └─────────────────────┘
+                               │
+                               ▼
+                      ┌─────────────────────┐
+                      │   Context Store     │
+                      │    (User State)     │
+                      └─────────────────────┘
 ```
 
 ## Monitoring
@@ -304,3 +312,4 @@ Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 - **Issues**: [GitHub Issues](https://github.com/project-unisonOS/unison-orchestrator/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/project-unisonOS/unison-orchestrator/discussions)
 - **Security**: Report security issues to [security@unisonos.org](mailto:security@unisonos.org)
+
