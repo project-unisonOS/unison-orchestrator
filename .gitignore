@@ -39,4 +39,4 @@ out/
 *.exe
 *.dmg
 *.AppImage
-
+.gh-actions-venv*/
