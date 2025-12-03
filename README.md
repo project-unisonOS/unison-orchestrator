@@ -303,6 +303,10 @@ pip install -c ../constraints.txt -r requirements.txt
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 ```
 
+## Docs
+
+Full docs at https://project-unisonos.github.io
+
 ## License
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
@@ -312,4 +316,3 @@ Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 - **Issues**: [GitHub Issues](https://github.com/project-unisonOS/unison-orchestrator/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/project-unisonOS/unison-orchestrator/discussions)
 - **Security**: Report security issues to [security@unisonos.org](mailto:security@unisonos.org)
-
