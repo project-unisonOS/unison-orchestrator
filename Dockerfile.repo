@@ -1,14 +1,17 @@
+FROM ghcr.io/project-unisonos/unison-common-wheel:latest AS common_wheel
 FROM python:3.12-slim
 
 WORKDIR /app
 
+# Install dependencies, including unison_common wheel, using shared constraints
+COPY constraints.txt ./constraints.txt
 COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r ./requirements.txt
+COPY --from=common_wheel /tmp/wheels /tmp/wheels
+RUN pip install --no-cache-dir -c ./constraints.txt /tmp/wheels/unison_common-*.whl \
+    && pip install --no-cache-dir -c ./constraints.txt -r ./requirements.txt
 
 # Copy orchestrator source
 COPY src ./src
-# Copy vendored minimal unison_common into src so it's on sys.path
-COPY unison_common ./src/unison_common
 
 # Ensure Python can import from /app/src
 ENV PYTHONPATH=/app/src
