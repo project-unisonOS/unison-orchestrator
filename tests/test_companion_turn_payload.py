@@ -65,8 +65,10 @@ def test_process_turn_emits_cards_and_tool_activity(monkeypatch):
         return None
 
     mgr = companion.CompanionSessionManager(clients, companion.ToolRegistry())
-    monkeypatch.setattr(mgr, "_emit_downstream", fake_emit)
-    monkeypatch.setattr(mgr, "_log_context_graph", fake_log)
+    # Avoid downstream side effects while still exercising tool handling.
+    monkeypatch.setattr(mgr, "_emit_downstream", fake_emit, raising=False)
+    monkeypatch.setattr(mgr, "_log_context_graph", fake_log, raising=False)
+    monkeypatch.setattr(mgr, "_policy_allows_tool", lambda *a, **k: True, raising=False)
 
     envelope = {
         "intent": "companion.turn",

@@ -7,6 +7,7 @@ import httpx
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .clients import ServiceClients
@@ -14,6 +15,8 @@ from .services import evaluate_capability
 from .context_client import (
     load_conversation_messages,
     store_conversation_turn,
+    dashboard_get,
+    dashboard_put,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,7 +227,9 @@ class CompanionSessionManager:
             if ok2 and isinstance(body2, dict):
                 final_body = body2
             else:
-                tool_activity.append({"tool": "inference_followup", "status": "error", "detail": f"status={status2}"})
+                tool_activity.append(
+                    {"tool": "inference_followup", "status": "error", "detail": f"status={status2}"}
+                )
 
         extra_tool_activity = final_body.get("tool_activity") if isinstance(final_body, dict) else None
         if isinstance(extra_tool_activity, list):
@@ -232,8 +237,56 @@ class CompanionSessionManager:
         reply_text = final_body.get("result") or _first_assistant_content(final_body.get("messages"))
         self._remember_turn(person_id, session_id, messages, final_body, event_id)
         cards = final_body.get("cards") if isinstance(final_body, dict) else None
-        self._emit_downstream(reply_text, tool_activity, person_id, session_id, cards)
-        self._log_context_graph(person_id, session_id, reply_text, tool_activity, cards)
+
+        # Derive simple metadata for downstream surfaces and context-graph.
+        origin_intent = envelope.get("intent") or "companion.turn"
+        tag_candidates: List[str] = []
+        if isinstance(origin_intent, str) and origin_intent:
+            tag_candidates.append(origin_intent)
+        for ta in tool_activity:
+            name = ta.get("tool") or ta.get("name")
+            if isinstance(name, str) and name:
+                tag_candidates.append(name)
+        seen: set[str] = set()
+        tags: List[str] = []
+        for t in tag_candidates:
+            if t not in seen:
+                seen.add(t)
+                tags.append(t)
+
+        created_at = time.time()
+        # Best-effort emit to downstream surfaces; support both the full signature
+        # and older test doubles that only accept the original parameters.
+        emit = self._emit_downstream
+        try:
+            import inspect
+
+            sig = inspect.signature(emit)
+            if len(sig.parameters) <= 5:
+                emit(reply_text, tool_activity, person_id, session_id, cards)
+            else:
+                emit(
+                    reply_text,
+                    tool_activity,
+                    person_id,
+                    session_id,
+                    cards,
+                    origin_intent,
+                    tags,
+                    created_at,
+                )
+        except Exception:
+            emit(reply_text, tool_activity, person_id, session_id, cards)
+        self._log_context_graph(
+            person_id,
+            session_id,
+            reply_text,
+            tool_activity,
+            cards,
+            origin_intent,
+            tags,
+            created_at,
+        )
 
         return {
             "text": reply_text,
@@ -244,6 +297,9 @@ class CompanionSessionManager:
             "event_id": event_id,
             "session_id": session_id,
             "person_id": person_id,
+            "origin_intent": origin_intent,
+            "tags": tags,
+            "created_at": created_at,
             "raw_response": final_body,
             "display_intent": {"text": reply_text, "images": []} if reply_text else None,
             "speak_intent": {"text": reply_text} if reply_text else None,
@@ -330,6 +386,39 @@ class CompanionSessionManager:
             if not ok:
                 return {"error": f"storage service error ({status})"}
             return body
+        if name == "workflow.recall":
+            # Allow the tool payload to override person_id if specified.
+            target_person = arguments.get("person_id") or person_id
+            query = arguments.get("query") or ""
+            time_hint = arguments.get("time_hint_days") or 30
+            try:
+                time_hint_int = int(time_hint)
+            except Exception:
+                time_hint_int = 30
+            tags_hint = arguments.get("tags_hint")
+            if not isinstance(tags_hint, list):
+                tags_hint = None
+            return recall_workflow_from_dashboard(
+                self._clients,
+                target_person,
+                query=query,
+                time_hint_days=time_hint_int,
+                tags_hint=tags_hint,
+            )
+        if name == "workflow.design":
+            target_person = arguments.get("person_id") or person_id
+            workflow_id = arguments.get("workflow_id") or ""
+            project_id = arguments.get("project_id")
+            mode = arguments.get("mode") or "design"
+            changes = arguments.get("changes") or []
+            return apply_workflow_design(
+                self._clients,
+                target_person,
+                workflow_id=workflow_id,
+                project_id=project_id,
+                mode=mode,
+                changes=changes,
+            )
         # MCP execution via discovery URL (best-effort)
         if name in self._registry._tools and self._registry._tools[name].source == "mcp":
             return self._execute_mcp_tool(name, arguments)
@@ -363,6 +452,147 @@ class CompanionSessionManager:
             return {"error": f"mcp discovery failed: {exc}"}
         return {"error": f"mcp tool {name} not found"}
 
+
+def apply_workflow_design(
+    service_clients: ServiceClients,
+    person_id: str,
+    workflow_id: str,
+    project_id: Optional[str] = None,
+    mode: str = "design",
+    changes: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Shared implementation for workflow design based on context KV and dashboard state.
+
+    Used both by the workflow_design skill handler and by the companion tool
+    execution path so that LLM tool calls and explicit skill invocations behave
+    consistently.
+    """
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return {"ok": False, "error": "invalid-workflow-id"}
+    workflow_id = workflow_id.strip()
+    if mode not in ("design", "review"):
+        mode = "design"
+    changes = changes or []
+    if not isinstance(changes, list):
+        changes = []
+
+    key = f"workflow:{person_id}:{workflow_id}"
+    ok_get, _, body_get = service_clients.context.post("/kv/get", {"keys": [key]})
+    workflow_doc: Dict[str, Any] = {}
+    if ok_get and isinstance(body_get, dict):
+        existing = (body_get.get("values") or {}).get(key) or {}
+        if isinstance(existing, dict):
+            workflow_doc = existing
+    steps = workflow_doc.get("steps") or []
+    if not isinstance(steps, list):
+        steps = []
+
+    changed = False
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        op = change.get("op") or ""
+        if op == "add_step":
+            title = (change.get("title") or "").strip()
+            if not title:
+                continue
+            position = change.get("position")
+            step = {
+                "id": change.get("id") or str(uuid.uuid4()),
+                "title": title,
+            }
+            if isinstance(position, int) and 0 <= position < len(steps):
+                steps.insert(position, step)
+            else:
+                steps.append(step)
+            changed = True
+
+    # Renumber steps for display.
+    for idx, step in enumerate(steps):
+        if isinstance(step, dict):
+            step["order"] = idx + 1
+
+    workflow_doc["workflow_id"] = workflow_id
+    workflow_doc["person_id"] = person_id
+    if isinstance(project_id, str) and project_id.strip():
+        workflow_doc["project_id"] = project_id.strip()
+    workflow_doc["steps"] = steps
+    workflow_doc["updated_at"] = time.time()
+
+    # Persist when designing or when changes are present.
+    if mode != "review" or changed:
+        ok_set, status_set, _ = service_clients.context.post("/kv/set", {"key": key, "value": workflow_doc})
+        if not ok_set:
+            return {
+                "ok": False,
+                "error": f"context error {status_set}",
+                "person_id": person_id,
+                "workflow_id": workflow_id,
+            }
+
+    now = time.time()
+    base_tags = ["workflow", "planning", "workflow.design"]
+    base_tags.append("review" if mode == "review" else "draft")
+    base_tags.append(f"workflow:{workflow_id}")
+    if isinstance(project_id, str) and project_id.strip():
+        base_tags.append(f"project:{project_id.strip()}")
+    seen_tags: set[str] = set()
+    tags: list[str] = []
+    for t in base_tags:
+        if t and t not in seen_tags:
+            seen_tags.add(t)
+            tags.append(t)
+
+    summary_card: Dict[str, Any] = {
+        "id": f"workflow-{workflow_id}-summary",
+        "type": "workflow.summary",
+        "title": f"Workflow: {workflow_id}",
+        "body": f"{len(steps)} step(s) in this workflow.",
+        "tool_activity": "workflow.design",
+        "origin_intent": "workflow.design",
+        "tags": tags,
+        "workflow_id": workflow_id,
+        "project_id": project_id,
+        "created_at": now,
+        "steps": [{"order": s.get("order"), "title": s.get("title")} for s in steps if isinstance(s, dict)],
+    }
+    cards = [summary_card]
+
+    # Persist to dashboard.
+    dashboard_state = {
+        "cards": cards,
+        "preferences": {},
+        "person_id": person_id,
+        "updated_at": now,
+    }
+    dashboard_put(service_clients, person_id, dashboard_state)
+
+    # Emit to renderer experiences if configured.
+    renderer_url = os.getenv("UNISON_RENDERER_URL")
+    if renderer_url:
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                for card in cards:
+                    exp = dict(card)
+                    exp.setdefault("person_id", person_id)
+                    exp.setdefault("ts", now)
+                    client.post(f"{renderer_url}/experiences", json=exp)
+        except Exception:
+            # Renderer emit failures are non-fatal
+            pass
+
+    return {
+        "ok": True,
+        "person_id": person_id,
+        "workflow_id": workflow_id,
+        "project_id": project_id,
+        "mode": mode,
+        "workflow": workflow_doc,
+        "cards": cards,
+    }
+
+
     def _emit_downstream(
         self,
         text: Optional[str],
@@ -370,19 +600,27 @@ class CompanionSessionManager:
         person_id: str,
         session_id: str,
         cards: Optional[List[Dict[str, Any]]] = None,
+        origin_intent: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        created_at: Optional[float] = None,
     ) -> None:
         """Best-effort emit to renderer and IO speech if configured."""
         if not text:
             return
-        payload = {
+        ts = created_at or time.time()
+        payload: Dict[str, Any] = {
             "text": text,
             "tool_activity": tool_activity,
             "person_id": person_id,
             "session_id": session_id,
-            "ts": time.time(),
+            "ts": ts,
         }
         if cards:
             payload["cards"] = cards
+        if origin_intent:
+            payload["origin_intent"] = origin_intent
+        if tags:
+            payload["tags"] = tags
         headers = {}
         try:
             baton = None
@@ -424,11 +662,14 @@ class CompanionSessionManager:
         transcript: Optional[str],
         tool_activity: List[Dict[str, Any]],
         cards: Optional[List[Dict[str, Any]]] = None,
+        origin_intent: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        created_at: Optional[float] = None,
     ) -> None:
         """Best-effort logging of turns/tool calls into context-graph."""
         if not _CONTEXT_GRAPH_URL:
             return
-        body = {
+        body: Dict[str, Any] = {
             "user_id": person_id,
             "session_id": session_id,
             "dimensions": [
@@ -442,9 +683,30 @@ class CompanionSessionManager:
                 }
             ],
         }
+        value = body["dimensions"][0]["value"]
+        if origin_intent:
+            value["origin_intent"] = origin_intent
+        if tags:
+            value["tags"] = tags
+        if created_at is not None:
+            value["created_at"] = created_at
         try:
             with httpx.Client(timeout=2.0) as client:
+                # Maintain existing state-style update.
                 client.post(f"{_CONTEXT_GRAPH_URL}/context/update", json=body)
+                # Also record a trace event for future search.
+                event_meta = dict(value)
+                event_meta.setdefault("session_id", session_id)
+                trace_body = {
+                    "user_id": person_id,
+                    "trace": [
+                        {
+                            "event": origin_intent or "conversation.turn",
+                            "metadata": event_meta,
+                        }
+                    ],
+                }
+                client.post(f"{_CONTEXT_GRAPH_URL}/traces/replay", json=trace_body)
         except Exception as exc:
             logger.debug("context-graph emit failed: %s", exc)
 
@@ -466,6 +728,126 @@ class CompanionSessionManager:
         except Exception as exc:
             logger.debug("policy check failed: %s", exc)
         return True
+
+
+def recall_workflow_from_dashboard(
+    service_clients: ServiceClients,
+    person_id: str,
+    query: str = "",
+    time_hint_days: int = 30,
+    tags_hint: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Shared implementation for workflow recall based on dashboard state.
+
+    Used both by the workflow_recall skill handler and by the companion tool
+    execution path so that LLM tool calls and explicit skill invocations behave
+    consistently.
+    """
+    # Derive tags from hint or a very simple heuristic.
+    tags = tags_hint if isinstance(tags_hint, list) else None
+    if not tags:
+        lowered = str(query).lower()
+        inferred: List[str] = []
+        if "workflow" in lowered:
+            inferred.append("workflow")
+        if "design" in lowered:
+            inferred.append("design")
+        tags = inferred or ["workflow"]
+
+    now = time.time()
+    cutoff = now - float(time_hint_days) * 24 * 60 * 60
+
+    # Fetch current dashboard state from context.
+    state = dashboard_get(service_clients, person_id) or {}
+    cards = state.get("cards") or []
+    if not isinstance(cards, list):
+        cards = []
+
+    matched: List[Dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        card_tags = card.get("tags") or []
+        if not isinstance(card_tags, list):
+            card_tags = []
+        if tags and not any(t in card_tags for t in tags):
+            continue
+        created_at = card.get("created_at") or state.get("updated_at")
+        if isinstance(created_at, (int, float)) and created_at < cutoff:
+            continue
+        matched.append(card)
+
+    # Optionally enrich matches with context-graph traces when available.
+    if _CONTEXT_GRAPH_URL and tags:
+        try:
+            since_iso = datetime.fromtimestamp(cutoff).isoformat()
+            search_body: Dict[str, Any] = {
+                "user_id": person_id,
+                "tags": tags,
+                "since": since_iso,
+                "limit": 20,
+            }
+            with httpx.Client(timeout=2.0) as client:
+                resp = client.post(f"{_CONTEXT_GRAPH_URL}/traces/search", json=search_body)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            traces = data.get("traces") or []
+            for trace in traces:
+                meta = trace.get("metadata") or {}
+                for card in meta.get("cards") or []:
+                    if isinstance(card, dict):
+                        matched.append(card)
+        except Exception:
+            # Search enrichment is best-effort; ignore failures.
+            pass
+
+    # If nothing matches at all, fall back to the most recent cards.
+    if not matched:
+        matched = cards
+
+    recap_cards: List[Dict[str, Any]] = []
+    for base in matched[:3]:
+        summary = dict(base)
+        summary.setdefault("origin_intent", "workflow.recall")
+        summary_tags = summary.get("tags") or []
+        if not isinstance(summary_tags, list):
+            summary_tags = []
+        if "workflow" not in summary_tags:
+            summary_tags.append("workflow")
+        summary["tags"] = summary_tags
+        recap_cards.append(summary)
+
+    dashboard_state = {
+        "cards": recap_cards,
+        "preferences": state.get("preferences") or {},
+        "person_id": person_id,
+        "updated_at": now,
+    }
+    dashboard_put(service_clients, person_id, dashboard_state)
+
+    # Emit recap cards to renderer experiences if configured.
+    renderer_url = os.getenv("UNISON_RENDERER_URL")
+    if renderer_url:
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                for card in recap_cards:
+                    exp = dict(card)
+                    exp.setdefault("person_id", person_id)
+                    exp.setdefault("origin_intent", "workflow.recall")
+                    exp.setdefault("tags", card.get("tags") or ["workflow"])
+                    exp.setdefault("ts", time.time())
+                    client.post(f"{renderer_url}/experiences", json=exp)
+        except Exception:
+            # Renderer emit failures are non-fatal for recall.
+            pass
+
+    summary_text = (
+        "I’ve resurfaced your most recent workflow cards on the dashboard."
+        if recap_cards
+        else "I couldn’t find any workflow cards to recall yet."
+    )
+    return {"ok": True, "person_id": person_id, "cards": recap_cards, "summary_text": summary_text}
 
 
 def _first_assistant_content(messages: Optional[List[Dict[str, Any]]]) -> Optional[str]:

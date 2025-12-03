@@ -319,7 +319,7 @@ def register_event_routes(
     @api.post("/ingest")
     async def ingest_m4(
         body: Dict[str, Any],
-        current_user: Dict[str, Any] = Depends(_auth_dependency()),
+        current_user: Dict[str, Any] = Depends(verify_token),
         consent_grant: Optional[Dict[str, Any]] = consent_dependency,
     ):
         tracer = trace.get_tracer(__name__)

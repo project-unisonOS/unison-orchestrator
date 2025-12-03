@@ -4,7 +4,7 @@ import uuid
 from typing import Any, Callable, Dict
 
 from .clients import ServiceClients
-from .companion import CompanionSessionManager, ToolRegistry
+from .companion import CompanionSessionManager, ToolRegistry, recall_workflow_from_dashboard, apply_workflow_design
 from .context_client import dashboard_get, dashboard_put
 import os
 import httpx
@@ -112,6 +112,47 @@ def build_skill_state(
             "required": ["key", "value"],
         },
     )
+    tool_registry.register_skill_tool(
+        name="workflow.recall",
+        description="Recall recent workflow-related views and cards for the current person",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "query": {"type": "string"},
+                "time_hint_days": {"type": "integer", "minimum": 1},
+                "tags_hint": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["person_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="workflow.design",
+        description="Design or review a named workflow for the current person",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "workflow_id": {"type": "string"},
+                "project_id": {"type": "string"},
+                "mode": {"type": "string", "enum": ["design", "review"]},
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string"},
+                            "title": {"type": "string"},
+                            "position": {"type": "integer"},
+                            "id": {"type": "string"},
+                        },
+                        "required": ["op"],
+                    },
+                },
+            },
+            "required": ["person_id", "workflow_id"],
+        },
+    )
 
     def handler_person_enroll(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {})
@@ -192,7 +233,7 @@ def build_skill_state(
             return {"ok": False, "error": "missing person_id"}
         # Fetch existing profile to respect preferences (optional)
         profile_ok, _, profile_body = service_clients.context.get(f"/profile/{person_id}")
-        prefs = {}
+        prefs: Dict[str, Any] = {}
         if profile_ok and isinstance(profile_body, dict):
             prefs = (profile_body.get("profile") or {}).get("dashboard", {}).get("preferences", {})
         # Build priority cards (stub + existing dashboard resume)
@@ -200,7 +241,8 @@ def build_skill_state(
         existing_cards = existing_dashboard.get("cards") or []
         cards = payload.get("cards")
         if not cards:
-            # Stub priority cards; replace with real data fetches later
+            # Stub priority cards; replace with real data fetches later.
+            # Tag these cards so they can participate in recall flows.
             cards = [
                 {
                     "id": "dashboard-1",
@@ -208,6 +250,8 @@ def build_skill_state(
                     "title": "Your morning briefing",
                     "body": "Schedule, comms, and tasks summarized.",
                     "tool_activity": "calendar.refresh",
+                    "origin_intent": "dashboard.refresh",
+                    "tags": ["dashboard", "briefing"],
                 },
                 {
                     "id": "dashboard-2",
@@ -215,10 +259,17 @@ def build_skill_state(
                     "title": "Messages to respond to",
                     "body": "2 priority replies pending.",
                     "tool_activity": "comms.triage",
+                    "origin_intent": "dashboard.refresh",
+                    "tags": ["dashboard", "comms"],
                 },
             ]
         merged_cards = cards + existing_cards
-        dashboard_state = {"cards": merged_cards[:10], "preferences": prefs, "person_id": person_id, "updated_at": time.time()}
+        dashboard_state = {
+            "cards": merged_cards[:10],
+            "preferences": prefs,
+            "person_id": person_id,
+            "updated_at": time.time(),
+        }
         # Persist to context
         dashboard_put(service_clients, person_id, dashboard_state)
         # Emit to renderer experiences if configured
@@ -232,8 +283,57 @@ def build_skill_state(
                         exp.setdefault("ts", time.time())
                         client.post(f"{renderer_url}/experiences", json=exp)
             except Exception:
+                # Renderer emit failures are non-fatal
                 pass
         return {"ok": True, "person_id": person_id, "cards": dashboard_state["cards"]}
+
+    def handler_workflow_design(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create or edit a workflow for a person and surface its current state as cards.
+
+        This first implementation stores workflow documents in the context service's
+        key–value store and emits a summary card into the dashboard and renderer.
+        """
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        workflow_id = payload.get("workflow_id")
+        project_id = payload.get("project_id")
+        mode = payload.get("mode") or "design"
+        changes = payload.get("changes") or []
+        return apply_workflow_design(
+            service_clients,
+            person_id,
+            workflow_id=workflow_id or "",
+            project_id=project_id,
+            mode=mode,
+            changes=changes,
+        )
+
+    def handler_workflow_recall(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Recall recent workflow-related cards for a person and resurface them on the dashboard.
+
+        This implementation focuses on dashboard state in unison-context; future versions may also
+        consult context-graph traces for richer recall.
+        """
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        query = payload.get("query") or ""
+        time_hint_days = payload.get("time_hint_days") or 30
+        tags_hint = payload.get("tags_hint")
+
+        try:
+            time_hint_int = int(time_hint_days)
+        except Exception:
+            time_hint_int = 30
+
+        return recall_workflow_from_dashboard(
+            service_clients,
+            person_id,
+            query=query,
+            time_hint_days=time_hint_int,
+            tags_hint=tags_hint if isinstance(tags_hint, list) else None,
+        )
 
     def handler_caps_report(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload") or {}
@@ -309,6 +409,8 @@ def build_skill_state(
         "person_verify": handler_person_verify,
         "person_update_prefs": handler_person_update_prefs,
         "dashboard_refresh": handler_dashboard_refresh,
+        "workflow_design": handler_workflow_design,
+        "workflow_recall": handler_workflow_recall,
         "wakeword_update": handler_wakeword_update,
         "caps_report": handler_caps_report,
         "startup_prompt_plan": handler_startup_prompt_plan,
@@ -327,6 +429,8 @@ def build_skill_state(
         "person.verify": handler_person_verify,
         "person.update_prefs": handler_person_update_prefs,
         "dashboard.refresh": handler_dashboard_refresh,
+        "workflow.design": handler_workflow_design,
+        "workflow.recall": handler_workflow_recall,
         "wakeword.update": handler_wakeword_update,
         "caps.report": handler_caps_report,
         "startup.prompt.plan": handler_startup_prompt_plan,
