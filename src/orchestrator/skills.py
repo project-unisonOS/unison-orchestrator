@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Callable, Dict
 
-from .clients import ServiceClients
+from .clients import ServiceClients, ServiceHttpClient
 from .companion import CompanionSessionManager, ToolRegistry, recall_workflow_from_dashboard, apply_workflow_design
 from .context_client import dashboard_get, dashboard_put
 import os
@@ -225,6 +225,78 @@ def build_skill_state(
         if not ok:
             return {"ok": False, "error": f"context error {status}"}
         return {"ok": True, "person_id": person_id, "wakeword": wakeword}
+
+    def _ensure_comms_client() -> ServiceHttpClient:
+        if not service_clients.comms:
+            raise RuntimeError("comms client not configured")
+        return service_clients.comms
+
+    def handler_comms_check(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        channel = payload.get("channel") or "email"
+        if not isinstance(person_id, str) or not person_id:
+            return {"ok": False, "error": "missing person_id"}
+        comms_client = _ensure_comms_client()
+        ok, status, body = comms_client.post("/comms/check", {"person_id": person_id, "channel": channel})
+        if not ok or not isinstance(body, dict):
+            return {"ok": False, "error": f"comms error {status}"}
+        return {"ok": True, "person_id": person_id, "channel": channel, "messages": body.get("messages"), "cards": body.get("cards")}
+
+    def handler_comms_summarize(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        window = payload.get("window") or "today"
+        if not isinstance(person_id, str) or not person_id:
+            return {"ok": False, "error": "missing person_id"}
+        comms_client = _ensure_comms_client()
+        ok, status, body = comms_client.post("/comms/summarize", {"person_id": person_id, "window": window})
+        if not ok or not isinstance(body, dict):
+            return {"ok": False, "error": f"comms error {status}"}
+        return {"ok": True, "person_id": person_id, "summary": body.get("summary"), "cards": body.get("cards")}
+
+    def handler_comms_reply(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        thread_id = payload.get("thread_id")
+        message_id = payload.get("message_id")
+        body_text = payload.get("body") or ""
+        if not isinstance(person_id, str) or not person_id:
+            return {"ok": False, "error": "missing person_id"}
+        if not isinstance(thread_id, str) or not thread_id:
+            return {"ok": False, "error": "missing thread_id"}
+        if not isinstance(message_id, str) or not message_id:
+            return {"ok": False, "error": "missing message_id"}
+        comms_client = _ensure_comms_client()
+        ok, status, body = comms_client.post(
+            "/comms/reply",
+            {"person_id": person_id, "thread_id": thread_id, "message_id": message_id, "body": body_text},
+        )
+        if not ok or not isinstance(body, dict):
+            return {"ok": False, "error": f"comms error {status}"}
+        return {"ok": True, "person_id": person_id, "thread_id": thread_id, "message_id": message_id, "response": body}
+
+    def handler_comms_compose(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        channel = payload.get("channel") or "email"
+        recipients = payload.get("recipients") or []
+        subject = payload.get("subject") or ""
+        body_text = payload.get("body") or ""
+        if not isinstance(person_id, str) or not person_id:
+            return {"ok": False, "error": "missing person_id"}
+        if not recipients or not isinstance(recipients, list):
+            return {"ok": False, "error": "recipients required"}
+        if not subject:
+            return {"ok": False, "error": "subject required"}
+        comms_client = _ensure_comms_client()
+        ok, status, body = comms_client.post(
+            "/comms/compose",
+            {"person_id": person_id, "channel": channel, "recipients": recipients, "subject": subject, "body": body_text},
+        )
+        if not ok or not isinstance(body, dict):
+            return {"ok": False, "error": f"comms error {status}"}
+        return {"ok": True, "person_id": person_id, "channel": channel, "response": body}
 
     def handler_dashboard_refresh(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
@@ -462,6 +534,10 @@ def build_skill_state(
         "workflow_design": handler_workflow_design,
         "workflow_recall": handler_workflow_recall,
         "wakeword_update": handler_wakeword_update,
+        "comms_check": handler_comms_check,
+        "comms_summarize": handler_comms_summarize,
+        "comms_reply": handler_comms_reply,
+        "comms_compose": handler_comms_compose,
         "caps_report": handler_caps_report,
         "startup_prompt_plan": handler_startup_prompt_plan,
     }
@@ -482,6 +558,10 @@ def build_skill_state(
         "workflow.design": handler_workflow_design,
         "workflow.recall": handler_workflow_recall,
         "wakeword.update": handler_wakeword_update,
+        "comms.check": handler_comms_check,
+        "comms.summarize": handler_comms_summarize,
+        "comms.reply": handler_comms_reply,
+        "comms.compose": handler_comms_compose,
         "caps.report": handler_caps_report,
         "startup.prompt.plan": handler_startup_prompt_plan,
     }

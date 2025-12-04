@@ -82,6 +82,7 @@ class ServiceClients:
     storage: ServiceHttpClient
     policy: ServiceHttpClient
     inference: ServiceHttpClient
+    comms: ServiceHttpClient | None = None
     payments: ServiceHttpClient | None = None
 
     @classmethod
@@ -89,10 +90,14 @@ class ServiceClients:
         payments_client = None
         if endpoints.payments_host and endpoints.payments_port:
             payments_client = ServiceHttpClient(endpoints.payments_host, endpoints.payments_port)
+        comms_client = None
+        if endpoints.comms_host and endpoints.comms_port:
+            comms_client = ServiceHttpClient(endpoints.comms_host, endpoints.comms_port)
         return cls(
             context=ServiceHttpClient(endpoints.context_host, endpoints.context_port),
             storage=ServiceHttpClient(endpoints.storage_host, endpoints.storage_port),
             policy=ServiceHttpClient(endpoints.policy_host, endpoints.policy_port),
             inference=ServiceHttpClient(endpoints.inference_host, endpoints.inference_port),
+            comms=comms_client,
             payments=payments_client,
         )
