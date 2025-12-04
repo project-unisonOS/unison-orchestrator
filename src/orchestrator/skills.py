@@ -19,6 +19,7 @@ def build_skill_state(
     """Return default skills and handler registry backed by downstream clients."""
     tool_registry = ToolRegistry()
     companion_manager = CompanionSessionManager(service_clients, tool_registry)
+    context_graph_url = os.getenv("UNISON_CONTEXT_GRAPH_URL") or os.getenv("UNISON_CONTEXT_GRAPH_BASE_URL")
 
     def handler_echo(envelope: Dict[str, Any]) -> Dict[str, Any]:
         return {"echo": envelope.get("payload", {})}
@@ -339,6 +340,53 @@ def build_skill_state(
             raise RuntimeError("comms client not configured")
         return service_clients.comms
 
+    def _log_comms_context(person_id: str, intent: str, cards: Any, extra: Dict[str, Any] | None = None) -> None:
+        """Best-effort log of comms events into context-graph."""
+        if not context_graph_url:
+            return
+        try:
+            cards_for_log = cards if isinstance(cards, list) else []
+            tag_set = set()
+            for card in cards_for_log:
+                if not isinstance(card, dict):
+                    continue
+                for t in card.get("tags") or []:
+                    if isinstance(t, str):
+                        tag_set.add(t)
+            tags = list(tag_set)
+            created_at = time.time()
+            body = {
+                "user_id": person_id,
+                "session_id": "",
+                "dimensions": [
+                    {
+                        "name": "comms",
+                        "value": {
+                            "cards": cards_for_log,
+                            "origin_intent": intent,
+                            "tags": tags,
+                            "created_at": created_at,
+                            "extra": extra or {},
+                        },
+                    }
+                ],
+            }
+            trace_body = {
+                "user_id": person_id,
+                "trace": [
+                    {
+                        "event": intent,
+                        "metadata": {"tags": tags, "cards": cards_for_log, "created_at": created_at, "extra": extra or {}},
+                    }
+                ],
+            }
+            with httpx.Client(timeout=2.0) as client:
+                client.post(f"{context_graph_url}/context/update", json=body)
+                client.post(f"{context_graph_url}/traces/replay", json=trace_body)
+        except Exception:
+            # Never break comms flow on context-graph errors.
+            pass
+
     def handler_comms_check(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
         person_id = payload.get("person_id") or "local-user"
@@ -349,7 +397,9 @@ def build_skill_state(
         ok, status, body = comms_client.post("/comms/check", {"person_id": person_id, "channel": channel})
         if not ok or not isinstance(body, dict):
             return {"ok": False, "error": f"comms error {status}"}
-        return {"ok": True, "person_id": person_id, "channel": channel, "messages": body.get("messages"), "cards": body.get("cards")}
+        cards = body.get("cards")
+        _log_comms_context(person_id, "comms.check", cards, {"channel": channel})
+        return {"ok": True, "person_id": person_id, "channel": channel, "messages": body.get("messages"), "cards": cards}
 
     def handler_comms_summarize(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
@@ -361,7 +411,9 @@ def build_skill_state(
         ok, status, body = comms_client.post("/comms/summarize", {"person_id": person_id, "window": window})
         if not ok or not isinstance(body, dict):
             return {"ok": False, "error": f"comms error {status}"}
-        return {"ok": True, "person_id": person_id, "summary": body.get("summary"), "cards": body.get("cards")}
+        cards = body.get("cards")
+        _log_comms_context(person_id, "comms.summarize", cards, {"window": window})
+        return {"ok": True, "person_id": person_id, "summary": body.get("summary"), "cards": cards}
 
     def handler_comms_reply(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
@@ -382,6 +434,7 @@ def build_skill_state(
         )
         if not ok or not isinstance(body, dict):
             return {"ok": False, "error": f"comms error {status}"}
+        _log_comms_context(person_id, "comms.reply", [], {"thread_id": thread_id, "message_id": message_id})
         return {"ok": True, "person_id": person_id, "thread_id": thread_id, "message_id": message_id, "response": body}
 
     def handler_comms_compose(envelope: Dict[str, Any]) -> Dict[str, Any]:
@@ -404,6 +457,8 @@ def build_skill_state(
         )
         if not ok or not isinstance(body, dict):
             return {"ok": False, "error": f"comms error {status}"}
+        tags = body.get("tags") if isinstance(body, dict) else None
+        _log_comms_context(person_id, "comms.compose", [], {"channel": channel, "tags": tags, "recipients": recipients})
         return {"ok": True, "person_id": person_id, "channel": channel, "response": body}
 
     def handler_dashboard_refresh(envelope: Dict[str, Any]) -> Dict[str, Any]:
