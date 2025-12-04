@@ -475,6 +475,17 @@ def build_skill_state(
         existing_dashboard = dashboard_get(service_clients, person_id)
         existing_cards = existing_dashboard.get("cards") or []
         cards = payload.get("cards")
+        # Pull comms cards from comms service (best effort)
+        comms_cards: List[Dict[str, Any]] = []
+        if service_clients.comms:
+            try:
+                ok, status, body = service_clients.comms.post(
+                    "/comms/check", {"person_id": person_id, "channel": "email"}
+                )
+                if ok and isinstance(body, dict) and isinstance(body.get("cards"), list):
+                    comms_cards = [c for c in body.get("cards") if isinstance(c, dict)]
+            except Exception:
+                comms_cards = []
         if not cards:
             # Stub priority cards; replace with real data fetches later.
             # Tag these cards so they can participate in recall flows.
@@ -498,7 +509,7 @@ def build_skill_state(
                     "tags": ["dashboard", "comms"],
                 },
             ]
-        merged_cards = cards + existing_cards
+        merged_cards = cards + comms_cards + existing_cards
         dashboard_state = {
             "cards": merged_cards[:10],
             "preferences": prefs,

@@ -36,6 +36,8 @@ def test_dashboard_refresh_persists_and_emits(monkeypatch):
     storage = _StubClient()
     policy = _StubClient()
     inf = _StubClient()
+    comms = _StubClient()
+    comms.enqueue_post(True, 200, {"cards": [{"id": "c1", "origin_intent": "comms.check"}]})
     # renderer URL to ensure emit is attempted
     monkeypatch.setenv("UNISON_RENDERER_URL", "http://renderer")
     # stub httpx client to avoid network
@@ -50,7 +52,7 @@ def test_dashboard_refresh_persists_and_emits(monkeypatch):
         def post(self, *args, **kwargs): return FakeResp()
     monkeypatch.setattr("httpx.Client", FakeClient)
 
-    service_clients = ServiceClients(context=ctx, storage=storage, policy=policy, inference=inf)
+    service_clients = ServiceClients(context=ctx, storage=storage, policy=policy, inference=inf, comms=comms)
     state = build_skill_state(service_clients)
     handler = state["handlers"]["dashboard_refresh"]
 
@@ -58,6 +60,8 @@ def test_dashboard_refresh_persists_and_emits(monkeypatch):
     assert result.get("ok") is True
     # context dashboard write
     assert any("/dashboard/p1" in p[0] for p in ctx.posts)
+    # comms check invoked and cards merged
+    assert any("/comms/check" in p[0] for p in comms.posts)
 
 
 def test_dashboard_refresh_logs_to_context_graph_when_configured(monkeypatch):
