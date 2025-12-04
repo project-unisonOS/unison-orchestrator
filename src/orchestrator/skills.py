@@ -478,14 +478,15 @@ def build_skill_state(
         # Pull comms cards from comms service (best effort)
         comms_cards: List[Dict[str, Any]] = []
         if service_clients.comms:
-            try:
-                ok, status, body = service_clients.comms.post(
-                    "/comms/check", {"person_id": person_id, "channel": "email"}
-                )
-                if ok and isinstance(body, dict) and isinstance(body.get("cards"), list):
-                    comms_cards = [c for c in body.get("cards") if isinstance(c, dict)]
-            except Exception:
-                comms_cards = []
+            for channel in ("email", "unison"):
+                try:
+                    ok, status, body = service_clients.comms.post(
+                        "/comms/check", {"person_id": person_id, "channel": channel}
+                    )
+                    if ok and isinstance(body, dict) and isinstance(body.get("cards"), list):
+                        comms_cards.extend([c for c in body.get("cards") if isinstance(c, dict)])
+                except Exception:
+                    continue
         if not cards:
             # Stub priority cards; replace with real data fetches later.
             # Tag these cards so they can participate in recall flows.
