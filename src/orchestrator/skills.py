@@ -208,6 +208,44 @@ def build_skill_state(
             "required": ["person_id", "recipients", "subject", "body"],
         },
     )
+    tool_registry.register_skill_tool(
+        name="comms.join_meeting",
+        description="Join a meeting by meeting id/link",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "meeting_id": {"type": "string"},
+                "join_url": {"type": "string"},
+            },
+            "required": ["person_id", "meeting_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.prepare_meeting",
+        description="Prepare a meeting (agenda/participants)",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "meeting_id": {"type": "string"},
+            },
+            "required": ["person_id", "meeting_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.debrief_meeting",
+        description="Debrief after a meeting",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "meeting_id": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["person_id", "meeting_id"],
+        },
+    )
 
     tool_registry.register_skill_tool(
         name="comms.check",
@@ -461,6 +499,42 @@ def build_skill_state(
         _log_comms_context(person_id, "comms.compose", [], {"channel": channel, "tags": tags, "recipients": recipients})
         return {"ok": True, "person_id": person_id, "channel": channel, "response": body}
 
+    def handler_comms_join_meeting(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        meeting_id = payload.get("meeting_id") or "meeting-1"
+        comms_client = _ensure_comms_client()
+        ok, status, body = comms_client.post("/comms/join_meeting", {"person_id": person_id, "meeting_id": meeting_id})
+        if not ok or not isinstance(body, dict):
+            return {"ok": False, "error": f"comms error {status}"}
+        cards = body.get("cards")
+        _log_comms_context(person_id, "comms.join_meeting", cards, {"meeting_id": meeting_id})
+        return {"ok": True, "person_id": person_id, "cards": cards}
+
+    def handler_comms_prepare_meeting(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        meeting_id = payload.get("meeting_id") or "meeting-1"
+        comms_client = _ensure_comms_client()
+        ok, status, body = comms_client.post("/comms/prepare_meeting", {"person_id": person_id, "meeting_id": meeting_id})
+        if not ok or not isinstance(body, dict):
+            return {"ok": False, "error": f"comms error {status}"}
+        cards = body.get("cards")
+        _log_comms_context(person_id, "comms.prepare_meeting", cards, {"meeting_id": meeting_id})
+        return {"ok": True, "person_id": person_id, "cards": cards}
+
+    def handler_comms_debrief_meeting(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id") or "local-user"
+        meeting_id = payload.get("meeting_id") or "meeting-1"
+        comms_client = _ensure_comms_client()
+        ok, status, body = comms_client.post("/comms/debrief_meeting", {"person_id": person_id, "meeting_id": meeting_id})
+        if not ok or not isinstance(body, dict):
+            return {"ok": False, "error": f"comms error {status}"}
+        cards = body.get("cards")
+        _log_comms_context(person_id, "comms.debrief_meeting", cards, {"meeting_id": meeting_id})
+        return {"ok": True, "person_id": person_id, "cards": cards}
+
     def handler_dashboard_refresh(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
         person_id = payload.get("person_id")
@@ -713,6 +787,9 @@ def build_skill_state(
         "comms_summarize": handler_comms_summarize,
         "comms_reply": handler_comms_reply,
         "comms_compose": handler_comms_compose,
+        "comms_join_meeting": handler_comms_join_meeting,
+        "comms_prepare_meeting": handler_comms_prepare_meeting,
+        "comms_debrief_meeting": handler_comms_debrief_meeting,
         "caps_report": handler_caps_report,
         "startup_prompt_plan": handler_startup_prompt_plan,
     }
@@ -737,6 +814,9 @@ def build_skill_state(
         "comms.summarize": handler_comms_summarize,
         "comms.reply": handler_comms_reply,
         "comms.compose": handler_comms_compose,
+        "comms.join_meeting": handler_comms_join_meeting,
+        "comms.prepare_meeting": handler_comms_prepare_meeting,
+        "comms.debrief_meeting": handler_comms_debrief_meeting,
         "caps.report": handler_caps_report,
         "startup.prompt.plan": handler_startup_prompt_plan,
     }
