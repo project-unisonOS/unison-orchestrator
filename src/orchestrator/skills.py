@@ -388,6 +388,10 @@ def build_skill_state(
             for card in cards_for_log:
                 if not isinstance(card, dict):
                     continue
+                # Surface explicit unison channel tags and providers for downstream recall
+                provider = card.get("provider")
+                if provider:
+                    tag_set.add(str(provider))
                 for t in card.get("tags") or []:
                     if isinstance(t, str):
                         tag_set.add(t)
