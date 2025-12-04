@@ -154,6 +154,114 @@ def build_skill_state(
         },
     )
 
+    tool_registry.register_skill_tool(
+        name="comms.check",
+        description="Check for new/unread communications and produce priority cards",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "channel": {"type": "string"},
+            },
+            "required": ["person_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.summarize",
+        description="Summarize communications over a window or topic",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "window": {"type": "string"},
+            },
+            "required": ["person_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.reply",
+        description="Reply to an existing thread/message",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "thread_id": {"type": "string"},
+                "message_id": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["person_id", "thread_id", "message_id", "body"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.compose",
+        description="Compose and send a new communication",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "channel": {"type": "string"},
+                "recipients": {"type": "array", "items": {"type": "string"}},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["person_id", "recipients", "subject", "body"],
+        },
+    )
+
+    tool_registry.register_skill_tool(
+        name="comms.check",
+        description="Check for new/unread communications and produce priority cards",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "channel": {"type": "string"},
+            },
+            "required": ["person_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.summarize",
+        description="Summarize communications over a window or topic",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "window": {"type": "string"},
+            },
+            "required": ["person_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.reply",
+        description="Reply to an existing thread/message",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "thread_id": {"type": "string"},
+                "message_id": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["person_id", "thread_id", "message_id", "body"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="comms.compose",
+        description="Compose and send a new communication",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "channel": {"type": "string"},
+                "recipients": {"type": "array", "items": {"type": "string"}},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["person_id", "recipients", "subject", "body"],
+        },
+    )
+
     def handler_person_enroll(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {})
         person_id = payload.get("person_id")
