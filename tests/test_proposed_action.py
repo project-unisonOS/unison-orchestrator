@@ -44,6 +44,7 @@ def test_proposed_action_envelope(service_clients):
             "intent": {"name": "turn_on", "parameters": {"level": 10}},
             "risk_level": "medium",
             "constraints": {"max_duration_ms": 1000},
+            "policy_context": {"consent_reference": "consent-123", "scopes": ["actuation.home.*"]},
         },
     }
 
@@ -61,3 +62,4 @@ def test_proposed_action_envelope(service_clients):
     # Ensure provenance/correlation is attached
     assert payload["provenance"]["orchestrator_task_id"] == "evt-123"
     assert payload["correlation_id"] == "corr-1"
+    assert payload["policy_context"]["consent_reference"] == "consent-123"
