@@ -468,6 +468,16 @@ def build_skill_state(
             return {"ok": False, "error": str(exc)}
 
         ok, status, body = actuation_client.post("/actuate", actuation_body)
+        telemetry_payload = {
+            "action_id": action_id,
+            "person_id": person_id,
+            "correlation_id": envelope.get("correlation_id"),
+            "intent": intent.get("name"),
+            "target": target,
+            "risk_level": risk_level,
+            "actuation_status": body.get("status") if isinstance(body, dict) else None,
+        }
+        _publish_actuation_telemetry(telemetry_payload)
         if ok and isinstance(body, dict):
             return {"ok": True, "action_id": action_id, "actuation_result": body}
         return {"ok": False, "error": f"actuation error {status}", "body": body}
@@ -481,6 +491,30 @@ def build_skill_state(
         if not service_clients.actuation:
             raise RuntimeError("actuation client not configured")
         return service_clients.actuation
+
+    def _ensure_consent_client() -> ServiceHttpClient | None:
+        return service_clients.consent
+
+    def _publish_actuation_telemetry(payload: Dict[str, Any]) -> None:
+        targets = []
+        if context_graph_url:
+            targets.append(f"{context_graph_url}/telemetry/actuation")
+        renderer_url = os.getenv("UNISON_EXPERIENCE_RENDERER_URL")
+        if not renderer_url:
+            host = os.getenv("UNISON_EXPERIENCE_RENDERER_HOST")
+            port = os.getenv("UNISON_EXPERIENCE_RENDERER_PORT")
+            if host and port:
+                renderer_url = f"http://{host}:{port}"
+        if renderer_url:
+            targets.append(f"{renderer_url}/telemetry/actuation")
+        if not targets:
+            return
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                for target in targets:
+                    client.post(target, json=payload)
+        except Exception:
+            pass
 
     def _ensure_consent_client() -> ServiceHttpClient | None:
         return service_clients.consent
