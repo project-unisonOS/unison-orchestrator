@@ -125,6 +125,8 @@ UNISON_POLICY_HOST=policy           # Policy service host
 UNISON_POLICY_PORT=8083             # Policy service port
 UNISON_INFERENCE_HOST=inference     # Inference service host
 UNISON_INFERENCE_PORT=8087          # Inference service port
+UNISON_ACTUATION_HOST=actuation     # Actuation service host
+UNISON_ACTUATION_PORT=8086          # Actuation service port
 
 # Security Configuration
 UNISON_JWT_SECRET=your-secret-key   # JWT signing secret

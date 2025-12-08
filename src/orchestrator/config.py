@@ -23,6 +23,8 @@ class ServiceEndpoints:
     inference_port: str = "8087"
     comms_host: str = "comms"
     comms_port: str = "8080"
+    actuation_host: str | None = None
+    actuation_port: str | None = None
     payments_host: str | None = None
     payments_port: str | None = None
 
@@ -55,6 +57,8 @@ class OrchestratorSettings:
             inference_port=os.getenv("UNISON_INFERENCE_PORT", "8087"),
             comms_host=os.getenv("UNISON_COMMS_HOST", "comms"),
             comms_port=os.getenv("UNISON_COMMS_PORT", "8080"),
+            actuation_host=os.getenv("UNISON_ACTUATION_HOST") or None,
+            actuation_port=os.getenv("UNISON_ACTUATION_PORT") or None,
             payments_host=os.getenv("UNISON_PAYMENTS_HOST") or None,
             payments_port=os.getenv("UNISON_PAYMENTS_PORT") or None,
         )

@@ -208,6 +208,42 @@ def build_skill_state(
             "required": ["person_id", "recipients", "subject", "body"],
         },
     )
+
+    tool_registry.register_skill_tool(
+        name="proposed_action",
+        description="Propose a structured Action Envelope for actuation",
+        parameters={
+            "type": "object",
+            "properties": {
+                "person_id": {"type": "string"},
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "device_id": {"type": "string"},
+                        "device_class": {"type": "string"},
+                        "location": {"type": "string"},
+                        "endpoint": {"type": "string"},
+                    },
+                    "required": ["device_id", "device_class"],
+                },
+                "intent": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "parameters": {"type": "object"},
+                        "human_readable": {"type": "string"},
+                    },
+                    "required": ["name", "parameters"],
+                },
+                "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+                "constraints": {"type": "object"},
+                "policy_context": {"type": "object"},
+                "telemetry_channel": {"type": "object"},
+                "provenance": {"type": "object"},
+            },
+            "required": ["person_id", "target", "intent"],
+        },
+    )
     tool_registry.register_skill_tool(
         name="comms.join_meeting",
         description="Join a meeting by meeting id/link",
@@ -373,10 +409,62 @@ def build_skill_state(
             return {"ok": False, "error": f"context error {status}"}
         return {"ok": True, "person_id": person_id, "wakeword": wakeword}
 
+    def handler_proposed_action(envelope: Dict[str, Any]) -> Dict[str, Any]:
+        """Forward proposed actions to the actuation service."""
+        payload = envelope.get("payload", {}) or {}
+        person_id = payload.get("person_id")
+        target = payload.get("target") or {}
+        intent = payload.get("intent") or {}
+        if not isinstance(person_id, str) or not person_id:
+            return {"ok": False, "error": "missing person_id"}
+        if not isinstance(target, dict) or "device_id" not in target or "device_class" not in target:
+            return {"ok": False, "error": "invalid target"}
+        if not isinstance(intent, dict) or "name" not in intent:
+            return {"ok": False, "error": "invalid intent"}
+
+        action_id = payload.get("action_id") or str(uuid.uuid4())
+        risk_level = payload.get("risk_level", "low")
+        actuation_body = {
+            "schema_version": "1.0",
+            "action_id": action_id,
+            "person_id": person_id,
+            "target": target,
+            "intent": {
+                "name": intent.get("name"),
+                "parameters": intent.get("parameters") or {},
+                "human_readable": intent.get("human_readable"),
+            },
+            "risk_level": risk_level,
+            "constraints": payload.get("constraints") or {},
+            "policy_context": payload.get("policy_context") or {},
+            "telemetry_channel": payload.get("telemetry_channel"),
+            "provenance": payload.get("provenance")
+            or {
+                "source_intent": intent.get("name", "proposed_action"),
+                "orchestrator_task_id": envelope.get("event_id"),
+            },
+            "correlation_id": envelope.get("correlation_id"),
+        }
+
+        try:
+            actuation_client = _ensure_actuation_client()
+        except Exception as exc:  # pragma: no cover - runtime config
+            return {"ok": False, "error": str(exc)}
+
+        ok, status, body = actuation_client.post("/actuate", actuation_body)
+        if ok and isinstance(body, dict):
+            return {"ok": True, "action_id": action_id, "actuation_result": body}
+        return {"ok": False, "error": f"actuation error {status}", "body": body}
+
     def _ensure_comms_client() -> ServiceHttpClient:
         if not service_clients.comms:
             raise RuntimeError("comms client not configured")
         return service_clients.comms
+
+    def _ensure_actuation_client() -> ServiceHttpClient:
+        if not service_clients.actuation:
+            raise RuntimeError("actuation client not configured")
+        return service_clients.actuation
 
     def _log_comms_context(person_id: str, intent: str, cards: Any, extra: Dict[str, Any] | None = None) -> None:
         """Best-effort log of comms events into context-graph."""
@@ -796,6 +884,7 @@ def build_skill_state(
         "comms_debrief_meeting": handler_comms_debrief_meeting,
         "caps_report": handler_caps_report,
         "startup_prompt_plan": handler_startup_prompt_plan,
+        "proposed_action": handler_proposed_action,
     }
 
     skills: Dict[str, SkillHandler] = {
@@ -823,6 +912,7 @@ def build_skill_state(
         "comms.debrief_meeting": handler_comms_debrief_meeting,
         "caps.report": handler_caps_report,
         "startup.prompt.plan": handler_startup_prompt_plan,
+        "proposed_action": handler_proposed_action,
     }
 
     return {"skills": skills, "handlers": handlers, "companion_manager": companion_manager}
