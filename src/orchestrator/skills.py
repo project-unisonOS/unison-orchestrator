@@ -424,6 +424,22 @@ def build_skill_state(
 
         action_id = payload.get("action_id") or str(uuid.uuid4())
         risk_level = payload.get("risk_level", "low")
+        policy_context = payload.get("policy_context") or {}
+
+        # Try to attach an existing actuation consent grant if none provided.
+        if not policy_context.get("consent_reference"):
+            consent_client = _ensure_consent_client()
+            if consent_client:
+                ok_c, status_c, body_c = consent_client.get(f"/grants/{person_id}")
+                if ok_c and isinstance(body_c, dict):
+                    grants = body_c.get("grants") or []
+                    if isinstance(grants, list):
+                        for g in grants:
+                            scopes = g.get("scopes") or []
+                            if any(str(s).startswith("actuation.") or s == "actuation.*" for s in scopes):
+                                policy_context["consent_reference"] = g.get("jti") or g.get("id")
+                                break
+
         actuation_body = {
             "schema_version": "1.0",
             "action_id": action_id,
@@ -436,7 +452,7 @@ def build_skill_state(
             },
             "risk_level": risk_level,
             "constraints": payload.get("constraints") or {},
-            "policy_context": payload.get("policy_context") or {},
+            "policy_context": policy_context,
             "telemetry_channel": payload.get("telemetry_channel"),
             "provenance": payload.get("provenance")
             or {
@@ -465,6 +481,9 @@ def build_skill_state(
         if not service_clients.actuation:
             raise RuntimeError("actuation client not configured")
         return service_clients.actuation
+
+    def _ensure_consent_client() -> ServiceHttpClient | None:
+        return service_clients.consent
 
     def _log_comms_context(person_id: str, intent: str, cards: Any, extra: Dict[str, Any] | None = None) -> None:
         """Best-effort log of comms events into context-graph."""

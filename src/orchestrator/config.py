@@ -25,6 +25,8 @@ class ServiceEndpoints:
     comms_port: str = "8080"
     actuation_host: str | None = None
     actuation_port: str | None = None
+    consent_host: str | None = None
+    consent_port: str | None = None
     payments_host: str | None = None
     payments_port: str | None = None
 
@@ -59,6 +61,8 @@ class OrchestratorSettings:
             comms_port=os.getenv("UNISON_COMMS_PORT", "8080"),
             actuation_host=os.getenv("UNISON_ACTUATION_HOST") or None,
             actuation_port=os.getenv("UNISON_ACTUATION_PORT") or None,
+            consent_host=os.getenv("UNISON_CONSENT_HOST") or None,
+            consent_port=os.getenv("UNISON_CONSENT_PORT") or None,
             payments_host=os.getenv("UNISON_PAYMENTS_HOST") or None,
             payments_port=os.getenv("UNISON_PAYMENTS_PORT") or None,
         )

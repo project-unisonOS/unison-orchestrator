@@ -84,6 +84,7 @@ class ServiceClients:
     inference: ServiceHttpClient
     comms: ServiceHttpClient | None = None
     actuation: ServiceHttpClient | None = None
+    consent: ServiceHttpClient | None = None
     payments: ServiceHttpClient | None = None
 
     @classmethod
@@ -97,6 +98,9 @@ class ServiceClients:
         actuation_client = None
         if endpoints.actuation_host and endpoints.actuation_port:
             actuation_client = ServiceHttpClient(endpoints.actuation_host, endpoints.actuation_port)
+        consent_client = None
+        if endpoints.consent_host and endpoints.consent_port:
+            consent_client = ServiceHttpClient(endpoints.consent_host, endpoints.consent_port)
         return cls(
             context=ServiceHttpClient(endpoints.context_host, endpoints.context_port),
             storage=ServiceHttpClient(endpoints.storage_host, endpoints.storage_port),
@@ -104,5 +108,6 @@ class ServiceClients:
             inference=ServiceHttpClient(endpoints.inference_host, endpoints.inference_port),
             comms=comms_client,
             actuation=actuation_client,
+            consent=consent_client,
             payments=payments_client,
         )
