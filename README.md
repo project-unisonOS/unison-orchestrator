@@ -26,6 +26,7 @@ The orchestrator service:
 - Policy evaluation integration
 - Skill registry and dispatch system
 - Comprehensive audit logging
+- Actuation: `proposed_action` tool builds Action Envelopes (see unison-docs/dev/specs/action-envelope.md) and posts to `unison-actuation`.
 - Network-segmented deployment configuration
 
 ### 🚧 In Progress
@@ -60,6 +61,11 @@ pip install -r requirements.txt
 # Run with authentication
 export UNISON_JWT_SECRET="your-secret-key"
 python src/server.py
+
+# Actuation (new)
+# Set actuation host/port to enable proposed_action tool routing:
+# export UNISON_ACTUATION_HOST=actuation
+# export UNISON_ACTUATION_PORT=8086
 ```
 
 ### Docker Deployment
