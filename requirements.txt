@@ -10,7 +10,7 @@ opentelemetry-instrumentation-fastapi==0.42b0
 opentelemetry-instrumentation-httpx==0.42b0
 opentelemetry-exporter-jaeger==1.21.0
 opentelemetry-exporter-otlp==1.21.0
-opentelemetry-propagator-b3==1.21.0
+opentelemetry-propagator-b3==1.39.1
 opentelemetry-propagator-jaeger==1.21.0
 
 # unison-common package (local install)
