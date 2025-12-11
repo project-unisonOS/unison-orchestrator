@@ -38,6 +38,7 @@ from unison_common.auth import rate_limit
 from unison_common.idempotency import IdempotencyConfig, IdempotencyManager, get_idempotency_manager
 from unison_common.idempotency_middleware import IdempotencyKeyRequiredMiddleware, IdempotencyMiddleware
 from unison_common.logging import configure_logging
+from unison_common.audit_middleware import AuditMiddleware
 from router import Router, RoutingStrategy
 from collections import defaultdict
 
@@ -91,6 +92,9 @@ logger.info("P0.3: Tracing middleware enabled")
 # Context baton validation (optional; only enforces signature/expiry if header is present)
 app.add_middleware(BatonMiddleware)
 logger.info("Context baton middleware enabled (optional validation)")
+
+# Audit logging with header redaction (no client IP in default)
+app.add_middleware(AuditMiddleware, service_name="unison-orchestrator")
 
 # Multimodal capabilities
 try:
