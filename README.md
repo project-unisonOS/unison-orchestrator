@@ -78,6 +78,16 @@ docker compose up -d orchestrator
 curl http://localhost:8080/health
 ```
 
+## Tests
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
+```
+
+## Docs
+- Architecture and specs: `unison-docs/dev/unison-architecture-overview.md`
+- Repo roles: `unison-docs/dev/unison-repo-roles.md`
+- Compatibility matrix: `unison-docs/dev/compatibility-matrix.md`
+
 ### Security-Hardened Deployment
 ```bash
 # Using the security configuration
