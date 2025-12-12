@@ -156,6 +156,53 @@ def build_skill_state(
     )
 
     tool_registry.register_skill_tool(
+        name="propose_prompt_update",
+        description="Propose a persistent update to the user-owned prompt config (does not apply changes).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "enum": ["identity", "priorities"]},
+                "ops": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string", "enum": ["add", "replace", "remove"]},
+                            "path": {"type": "string"},
+                            "value": {},
+                        },
+                        "required": ["op", "path"],
+                    },
+                },
+                "rationale": {"type": "string"},
+                "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+            },
+            "required": ["target", "ops", "rationale", "risk"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="apply_prompt_update",
+        description="Apply a previously proposed prompt update; may require explicit approval for high-risk changes.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "proposal_id": {"type": "string"},
+                "approved": {"type": "boolean", "default": False},
+            },
+            "required": ["proposal_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="rollback_prompt_update",
+        description="Rollback prompt configuration to a previous snapshot tarball.",
+        parameters={
+            "type": "object",
+            "properties": {"snapshot": {"type": "string"}},
+            "required": ["snapshot"],
+        },
+    )
+
+    tool_registry.register_skill_tool(
         name="comms.check",
         description="Check for new/unread communications and produce priority cards",
         parameters={

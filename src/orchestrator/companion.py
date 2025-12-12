@@ -18,6 +18,8 @@ from .context_client import (
     dashboard_get,
     dashboard_put,
 )
+from unison_common.prompt.engine import PromptEngine
+from unison_common.prompt.updates import PromptUpdateProposal
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,8 @@ class CompanionSessionManager:
         self._clients = service_clients
         self._registry = tool_registry or ToolRegistry()
         self._memory: Dict[str, List[Dict[str, Any]]] = {}
+        self._prompt_engines: Dict[str, PromptEngine] = {}
+        self._prompt_update_proposals: Dict[str, Dict[str, PromptUpdateProposal]] = {}
         self._registry.refresh_from_mcp()
         self._registry.refresh_from_context_graph(self._clients)
         self._registry.publish_to_context_graph(self._clients)
@@ -183,11 +187,16 @@ class CompanionSessionManager:
 
         prior_turns = self._load_memory(person_id, session_id)
 
+        # Inject compiled system prompt as the first message (model-agnostic).
+        # This is owned by UnisonOS and persisted outside the model lifecycle.
+        system_prompt = self._get_system_prompt(person_id, session_id, envelope)
+        system_message = {"role": "system", "content": system_prompt}
+
         inference_payload = {
             "intent": "companion.turn",
             "person_id": person_id,
             "session_id": session_id,
-            "messages": prior_turns + messages,
+            "messages": [system_message] + prior_turns + messages,
             "attachments": attachments,
             "tools": self._registry.list_llm_tools(),
             "tool_choice": payload.get("tool_choice", "auto"),
@@ -306,6 +315,20 @@ class CompanionSessionManager:
             "wakeword": reply_text if payload.get("wakeword_command") else None,
         }
 
+    def _get_system_prompt(self, person_id: str, session_id: str, envelope: Dict[str, Any]) -> str:
+        engine = self._prompt_engines.get(person_id)
+        if engine is None:
+            engine = PromptEngine.for_person(person_id=person_id)
+            self._prompt_engines[person_id] = engine
+        session_context = {
+            "intent": envelope.get("intent") or "companion.turn",
+            "session_id": session_id,
+            "person_id": person_id,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        compiled = engine.compile(session_context=session_context)
+        return compiled.markdown
+
     def _remember_turn(
         self,
         person_id: str,
@@ -369,6 +392,51 @@ class CompanionSessionManager:
         """Very small executor for built-in tools; MCP tools are stubbed for now."""
         if not name:
             return {"error": "missing tool name"}
+        if name == "propose_prompt_update":
+            target = arguments.get("target")
+            ops = arguments.get("ops")
+            rationale = arguments.get("rationale") or ""
+            risk = arguments.get("risk") or "medium"
+            if target not in ("identity", "priorities"):
+                return {"error": "target must be 'identity' or 'priorities'"}
+            if not isinstance(ops, list):
+                return {"error": "ops must be an array of JSON Patch operations"}
+            if not isinstance(rationale, str) or not rationale.strip():
+                return {"error": "rationale is required"}
+            if risk not in ("low", "medium", "high"):
+                return {"error": "risk must be low|medium|high"}
+            engine = self._prompt_engines.get(person_id) or PromptEngine.for_person(person_id=person_id)
+            self._prompt_engines[person_id] = engine
+            proposal = engine.propose_update(target=target, ops=ops, rationale=rationale, risk=risk)
+            self._prompt_update_proposals.setdefault(person_id, {})[proposal.proposal_id] = proposal
+            return {
+                "ok": True,
+                "proposal_id": proposal.proposal_id,
+                "target": proposal.target,
+                "engine_risk": proposal.engine_risk,
+                "model_risk": proposal.model_risk,
+                "requires_approval": proposal.engine_risk == "high",
+            }
+        if name == "apply_prompt_update":
+            proposal_id = arguments.get("proposal_id")
+            approved = arguments.get("approved", False)
+            if not isinstance(proposal_id, str) or not proposal_id:
+                return {"error": "proposal_id is required"}
+            if not isinstance(approved, bool):
+                return {"error": "approved must be boolean"}
+            proposal = self._prompt_update_proposals.get(person_id, {}).get(proposal_id)
+            if proposal is None:
+                return {"error": f"unknown proposal_id: {proposal_id}"}
+            engine = self._prompt_engines.get(person_id) or PromptEngine.for_person(person_id=person_id)
+            self._prompt_engines[person_id] = engine
+            return engine.apply_update(proposal, approved=approved)
+        if name == "rollback_prompt_update":
+            snapshot = arguments.get("snapshot")
+            if not isinstance(snapshot, str) or not snapshot:
+                return {"error": "snapshot is required (path to a .tar in prompt snapshots dir)"}
+            engine = self._prompt_engines.get(person_id) or PromptEngine.for_person(person_id=person_id)
+            self._prompt_engines[person_id] = engine
+            return engine.rollback(snapshot=snapshot)
         if name == "context.get":
             keys = arguments.get("keys", [])
             if not isinstance(keys, list):
