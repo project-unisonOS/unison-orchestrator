@@ -990,6 +990,7 @@ def build_skill_state(
     skills: Dict[str, SkillHandler] = {
         "echo": handler_echo,
         "summarize.doc": handler_summarize_doc,
+        "summarize.document": handler_summarize_doc,
         "analyze.code": handler_inference,
         "translate.text": handler_inference,
         "generate.idea": handler_inference,
