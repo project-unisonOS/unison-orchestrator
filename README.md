@@ -108,6 +108,10 @@ Phase 3 additions:
   - `./.venv/bin/python scripts/event_graph_replay.py <trace_id>`
 - Optional Event Graph API routes (auth-gated): `UNISON_ENABLE_EVENT_GRAPH_ROUTES=true` enables `POST /event-graph/append` and `POST /event-graph/query`.
 
+Phase 4 additions (speech-first IO):
+- `POST /input` is enabled by default and accepts `InputEventEnvelope` (used by `unison-io-speech` to forward final transcripts).
+- The orchestrator emits early renderer feedback (`intent.recognized`) before `rom.render` to measure time-to-first-feedback.
+
 ## Docs
 - Architecture and specs: `unison-docs/dev/unison-architecture-overview.md`
 - Repo roles: `unison-docs/dev/unison-repo-roles.md`
