@@ -11,6 +11,7 @@ from typing import Any, Dict
 from orchestrator import OrchestratorSettings, ServiceClients, instrument_fastapi, setup_telemetry
 from orchestrator.api import register_event_routes
 from orchestrator.api.admin import register_admin_routes
+from orchestrator.api.dev import register_dev_routes
 from orchestrator.api.skills import register_skill_routes
 from orchestrator.api.voice import register_voice_routes
 from orchestrator.api.payments import register_payment_routes
@@ -217,6 +218,10 @@ if _companion_manager:
 _payment_service = register_payment_routes(app, metrics=_metrics, service_clients=service_clients)
 
 register_replay_routes(app)
+
+if os.getenv("UNISON_ENABLE_DEV_ROUTES", "false").lower() in {"1", "true", "yes", "on"}:
+    register_dev_routes(app)
+    logger.info("Dev routes enabled: /dev/thin-slice")
 
 @app.get("/capabilities")
 async def capabilities():

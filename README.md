@@ -83,6 +83,21 @@ curl http://localhost:8080/health
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 ```
 
+## Dev: Thin vertical slice (Phase 1)
+
+Runs: text → router (stub) → planner (stub) → policy gate (stub) → deterministic tool → ROM → renderer emit → trace artifact.
+
+```bash
+./.venv/bin/python scripts/thin_slice.py "hello" --trace-dir traces --renderer-url http://localhost:8092
+python3 ../tools/trace/trace_report.py traces/<trace_id>.json
+```
+
+Enable an HTTP dev route (requires auth unless `DISABLE_AUTH_FOR_TESTS=true`):
+```bash
+UNISON_ENABLE_DEV_ROUTES=true python src/server.py
+# POST /dev/thin-slice {"text":"hello","renderer_url":"http://localhost:8092","trace_dir":"traces"}
+```
+
 ## Docs
 - Architecture and specs: `unison-docs/dev/unison-architecture-overview.md`
 - Repo roles: `unison-docs/dev/unison-repo-roles.md`
