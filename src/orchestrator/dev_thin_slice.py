@@ -18,6 +18,7 @@ from unison_common import (
 )
 
 from orchestrator.clients import ServiceClients
+from orchestrator.event_graph.store import JsonlEventGraphStore, new_event
 from orchestrator.interaction.planner_stage import PlannerStage
 from orchestrator.interaction.policy_gate import PolicyGate
 from orchestrator.interaction.rom_builder import RomBuilder
@@ -85,13 +86,39 @@ def run_thin_slice(
     clients: ServiceClients | None = None,
 ) -> ThinSliceResult:
     trace = TraceRecorder(service="unison-orchestrator.dev_thin_slice")
+    sid = session_id or f"dev-session-{uuid.uuid4().hex[:8]}"
+    event_graph_enabled = os.getenv("UNISON_EVENT_GRAPH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    event_store = JsonlEventGraphStore.from_env() if event_graph_enabled else None
+    last_event_id: str | None = None
+
+    def _append(event_type: str, *, attrs: Dict[str, Any] | None = None, payload: Dict[str, Any] | None = None) -> None:
+        nonlocal last_event_id
+        if not event_store:
+            return
+        evt = new_event(
+            trace_id=trace.trace_id,
+            event_type=event_type,
+            actor="dev_thin_slice",
+            person_id=person_id,
+            session_id=sid,
+            attrs=attrs,
+            payload=payload,
+            causation_id=last_event_id,
+        )
+        from unison_common import EventGraphAppend
+
+        event_store.append(
+            EventGraphAppend(trace_id=trace.trace_id, session_id=sid, person_id=person_id, events=[evt])
+        )
+        last_event_id = evt.event_id
+
     trace.emit_event("input_received", {"modality": "text"})
     with trace.span("input_received", {"modality": "text"}):
         pass
-
-    sid = session_id or f"dev-session-{uuid.uuid4().hex[:8]}"
+    _append("input_received", attrs={"modality": "text"}, payload={"text": text})
     with trace.span("session_created", {"session_id": sid}):
         session = IntentSession(session_id=sid, trace_id=trace.trace_id, person_id=person_id, created_at_unix_ms=_now_unix_ms())
+    _append("session_created", attrs={"session_id": sid})
 
     router = RouterStage()
     planner = PlannerStage()
@@ -118,17 +145,20 @@ def run_thin_slice(
     context_snapshot = None
     if clients is not None:
         context_snapshot = context_reader.read(clients=clients, person_id=person_id, trace=trace)
+        _append("context_snapshot", attrs={"has_profile": context_snapshot.profile is not None, "has_dashboard": context_snapshot.dashboard is not None})
 
     with trace.span("router_started"):
         _ = router.run(input_event, trace)
     with trace.span("router_ended"):
         pass
+    _append("router_completed")
 
     with trace.span("planner_started"):
         planner_out = planner.run(text=text, trace=trace, context=context_snapshot)
     trace.emit_event("planner_ended", {"schema_version": planner_out.schema_version})
     with trace.span("planner_ended", {"schema_version": planner_out.schema_version}):
         pass
+    _append("planner_output", attrs={"intent": planner_out.plan.intent.name, "actions": len(planner_out.plan.actions)})
 
     action = planner_out.plan.actions[0] if planner_out.plan.actions else None
     if action is None:
@@ -164,6 +194,7 @@ def run_thin_slice(
             auth_scope=None,
             safety_context=None,
         )
+    _append("policy_decision", attrs={"allowed": policy.allowed, "reason": policy.reason, "require_confirmation": policy.require_confirmation}, payload={"action": action.name})
 
     if not policy.allowed:
         trace.emit_event("policy_denied", {"reason": policy.reason})
@@ -174,6 +205,7 @@ def run_thin_slice(
         trace.emit_event("tool_ended", {"ok": tool_result.ok})
         with trace.span("tool_ended", {"ok": tool_result.ok, "tool": action.name}):
             pass
+    _append("tool_result", attrs={"ok": tool_result.ok}, payload={"action_id": tool_result.action_id, "tool": action.name, "result": tool_result.result, "error": tool_result.error})
 
     with trace.span("rom_built"):
         rom = rom_builder.build(
@@ -183,6 +215,7 @@ def run_thin_slice(
             tool_result=tool_result,
             policy=policy,
         )
+    _append("rom_built", payload={"rom": rom.model_dump(mode="json")})
 
     renderer_ok = False
     renderer_status: Optional[int] = None
@@ -200,8 +233,10 @@ def run_thin_slice(
             "renderer_emitted",
             {"ok": renderer_ok, "status": renderer_status, "renderer_url": renderer_url},
         )
+        _append("renderer_emitted", attrs={"ok": renderer_ok, "status": renderer_status, "renderer_url": renderer_url})
     else:
         trace.emit_event("renderer_skipped")
+        _append("renderer_skipped")
 
     if clients is not None:
         with trace.span("context_write_queued", {"ok": True}):
@@ -211,14 +246,18 @@ def run_thin_slice(
                 trace_id=trace.trace_id,
                 input_text=text,
             )
+        _append("context_write_queued", attrs={"batch_id": batch.batch_id})
         write_behind.flush_sync(clients=clients, batch=batch, trace=trace)
+        _append("context_write_flushed", attrs={"batch_id": batch.batch_id})
     else:
         trace.emit_event("context_write_queued", {"ok": True, "noop": True})
         with trace.span("context_write_queued", {"ok": True, "noop": True}):
             pass
+        _append("context_write_queued", attrs={"noop": True})
 
     status = TraceSpanStatus.OK if tool_result.ok and (renderer_url is None or renderer_ok) else TraceSpanStatus.ERROR
     trace.emit_event("completed", {"status": status.value})
+    _append("completed", attrs={"status": status.value})
 
     trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json"))
     return ThinSliceResult(

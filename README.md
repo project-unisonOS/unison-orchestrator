@@ -102,6 +102,12 @@ Phase 2 additions:
 - Context snapshot reads require `UNISON_CONTEXT_ROLE=service` (default) to satisfy `unison-context` header guard in dev.
 - Policy gate calls `unison-policy /evaluate` when service clients are available; set `UNISON_POLICY_FAIL_OPEN=true` only for local debugging.
 
+Phase 3 additions:
+- Event Graph append-only store (JSONL) enabled by default in the thin slice; configure with `UNISON_EVENT_GRAPH_DIR` and `UNISON_EVENT_GRAPH_FILE`, or disable with `UNISON_EVENT_GRAPH_ENABLED=false`.
+- Replay script:
+  - `./.venv/bin/python scripts/event_graph_replay.py <trace_id>`
+- Optional Event Graph API routes (auth-gated): `UNISON_ENABLE_EVENT_GRAPH_ROUTES=true` enables `POST /event-graph/append` and `POST /event-graph/query`.
+
 ## Docs
 - Architecture and specs: `unison-docs/dev/unison-architecture-overview.md`
 - Repo roles: `unison-docs/dev/unison-repo-roles.md`

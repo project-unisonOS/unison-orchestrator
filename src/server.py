@@ -12,6 +12,7 @@ from orchestrator import OrchestratorSettings, ServiceClients, instrument_fastap
 from orchestrator.api import register_event_routes
 from orchestrator.api.admin import register_admin_routes
 from orchestrator.api.dev import register_dev_routes
+from orchestrator.api.event_graph import register_event_graph_routes
 from orchestrator.api.skills import register_skill_routes
 from orchestrator.api.voice import register_voice_routes
 from orchestrator.api.payments import register_payment_routes
@@ -222,6 +223,10 @@ register_replay_routes(app)
 if os.getenv("UNISON_ENABLE_DEV_ROUTES", "false").lower() in {"1", "true", "yes", "on"}:
     register_dev_routes(app)
     logger.info("Dev routes enabled: /dev/thin-slice")
+
+if os.getenv("UNISON_ENABLE_EVENT_GRAPH_ROUTES", "false").lower() in {"1", "true", "yes", "on"}:
+    register_event_graph_routes(app)
+    logger.info("Event graph routes enabled: /event-graph/*")
 
 @app.get("/capabilities")
 async def capabilities():
