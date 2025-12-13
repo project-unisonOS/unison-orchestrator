@@ -24,6 +24,20 @@ class PlannerStage:
                     "has_dashboard": context.dashboard is not None,
                 },
             )
+        normalized = (text or "").strip()
+        if normalized.lower().startswith("browse ") and "://" in normalized:
+            url = normalized.split(" ", 1)[1].strip()
+            action = ActionEnvelope(
+                action_id=str(uuid.uuid4()),
+                kind="vdi",
+                name="vdi.browse",
+                args={"url": url},
+                risk_level="medium",
+                policy_context={"scopes": ["vdi.browse"]},
+            )
+            plan = Plan(intent=Intent(name="vdi.browse", goal="Browse a URL in a bounded VDI session"), actions=[action])
+            trace.emit_event("planner_output", {"actions": 1, "intent": "vdi.browse"})
+            return PlannerOutput(plan=plan, rationale="stub planner: browse URL")
         action = ActionEnvelope(
             action_id=str(uuid.uuid4()),
             kind="tool",

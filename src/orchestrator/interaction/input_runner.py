@@ -17,6 +17,7 @@ from orchestrator.interaction.rom_builder import RomBuilder
 from orchestrator.interaction.router_stage import RouterStage
 from orchestrator.interaction.tools import ToolRegistry
 from orchestrator.interaction.write_behind import ContextWriteBehindQueue
+from orchestrator.interaction.vdi_executor import VdiExecutor
 from unison_common import (
     ActionResult,
     EventGraphAppend,
@@ -122,6 +123,7 @@ def run_input_event(
     planner = PlannerStage()
     policy_gate = PolicyGate(clients=clients)
     tools = ToolRegistry.default()
+    vdi = VdiExecutor()
     rom_builder = RomBuilder()
     context_reader = ContextReader.from_env()
     write_behind = ContextWriteBehindQueue()
@@ -199,9 +201,36 @@ def run_input_event(
     if not policy.allowed:
         tool_result = ActionResult(action_id=action.action_id, ok=False, error=f"policy denied: {policy.reason}")
     else:
-        with trace.span("tool_started", {"tool": action.name}):
-            tool_result = tools.execute(action)
+        # Populate person/session for VDI tasks.
+        if action.kind == "vdi":
+            action.args.setdefault("person_id", person_id)
+            action.args.setdefault("session_id", sid)
+        with trace.span("tool_started", {"tool": action.name, "kind": action.kind}):
+            if action.kind == "vdi":
+                if emitter:
+                    emitter.emit(
+                        trace_id=trace.trace_id,
+                        session_id=sid,
+                        person_id=person_id,
+                        type="outcome.reflected",
+                        payload={"text": f"Starting VDI task: {action.name}", "person_id": person_id, "session_id": sid},
+                    )
+                tool_result = (
+                    vdi.execute(action=action, clients=clients, trace=trace)
+                    if clients and clients.actuation
+                    else ActionResult(action_id=action.action_id, ok=False, error="actuation client not configured")
+                )
+            else:
+                tool_result = tools.execute(action)
         trace.emit_event("tool_ended", {"ok": tool_result.ok})
+        if emitter and action.kind == "vdi":
+            emitter.emit(
+                trace_id=trace.trace_id,
+                session_id=sid,
+                person_id=person_id,
+                type="outcome.reflected",
+                payload={"text": f"VDI task {action.name} completed (ok={tool_result.ok})", "person_id": person_id, "session_id": sid},
+            )
     _append("tool_result", attrs={"ok": tool_result.ok}, payload={"tool": action.name, "error": tool_result.error})
 
     with trace.span("rom_built"):
