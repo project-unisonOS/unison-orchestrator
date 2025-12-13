@@ -40,12 +40,14 @@ def register_dev_routes(app) -> None:
         if not isinstance(text, str) or not text.strip():
             raise HTTPException(status_code=400, detail="text is required")
 
+        clients = getattr(app.state, "service_clients", None)
         result = run_thin_slice(
             text=text,
             person_id=str(body.get("person_id") or "local-person"),
             session_id=(str(body["session_id"]) if isinstance(body.get("session_id"), str) else None),
             renderer_url=(str(body["renderer_url"]) if isinstance(body.get("renderer_url"), str) else None),
             trace_dir=str(body.get("trace_dir") or "traces"),
+            clients=clients,
         )
         return {
             "ok": result.tool_result.ok,
@@ -58,4 +60,3 @@ def register_dev_routes(app) -> None:
         }
 
     app.include_router(api)
-

@@ -17,10 +17,13 @@ from unison_common import (
     TraceSpanStatus,
 )
 
+from orchestrator.clients import ServiceClients
 from orchestrator.interaction.planner_stage import PlannerStage
 from orchestrator.interaction.policy_gate import PolicyGate
 from orchestrator.interaction.rom_builder import RomBuilder
 from orchestrator.interaction.router_stage import RouterStage
+from orchestrator.interaction.context_reader import ContextReader
+from orchestrator.interaction.write_behind import ContextWriteBehindQueue
 from orchestrator.interaction.tools import ToolRegistry
 
 
@@ -79,6 +82,7 @@ def run_thin_slice(
     session_id: Optional[str] = None,
     renderer_url: Optional[str] = None,
     trace_dir: str = "traces",
+    clients: ServiceClients | None = None,
 ) -> ThinSliceResult:
     trace = TraceRecorder(service="unison-orchestrator.dev_thin_slice")
     trace.emit_event("input_received", {"modality": "text"})
@@ -91,9 +95,11 @@ def run_thin_slice(
 
     router = RouterStage()
     planner = PlannerStage()
-    policy_gate = PolicyGate()
+    policy_gate = PolicyGate(clients=clients)
     tools = ToolRegistry.default()
     rom_builder = RomBuilder()
+    context_reader = ContextReader.from_env()
+    write_behind = ContextWriteBehindQueue()
 
     # Create a minimal v1 input envelope for routing/planning.
     from unison_common import InputEventEnvelope
@@ -109,13 +115,17 @@ def run_thin_slice(
         session_id=session.session_id,
     )
 
+    context_snapshot = None
+    if clients is not None:
+        context_snapshot = context_reader.read(clients=clients, person_id=person_id, trace=trace)
+
     with trace.span("router_started"):
         _ = router.run(input_event, trace)
     with trace.span("router_ended"):
         pass
 
     with trace.span("planner_started"):
-        planner_out = planner.run(text=text, trace=trace)
+        planner_out = planner.run(text=text, trace=trace, context=context_snapshot)
     trace.emit_event("planner_ended", {"schema_version": planner_out.schema_version})
     with trace.span("planner_ended", {"schema_version": planner_out.schema_version}):
         pass
@@ -124,7 +134,13 @@ def run_thin_slice(
     if action is None:
         tool_result = ActionResult(action_id="none", ok=False, error="planner produced no actions")
         policy = PolicyDecision(allowed=False, reason="no actions")
-        rom = rom_builder.build(trace_id=trace.trace_id, session_id=session.session_id, person_id=person_id, tool_result=tool_result)
+        rom = rom_builder.build(
+            trace_id=trace.trace_id,
+            session_id=session.session_id,
+            person_id=person_id,
+            tool_result=tool_result,
+            policy=policy,
+        )
         trace.emit_event("rom_built")
         trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json"))
         return ThinSliceResult(
@@ -139,7 +155,15 @@ def run_thin_slice(
         )
 
     with trace.span("policy_checked", {"action": action.name}):
-        policy = policy_gate.check(action)
+        policy = policy_gate.check(
+            action,
+            trace=trace,
+            event_id=trace.trace_id,
+            actor="dev_thin_slice",
+            person_id=person_id,
+            auth_scope=None,
+            safety_context=None,
+        )
 
     if not policy.allowed:
         trace.emit_event("policy_denied", {"reason": policy.reason})
@@ -152,7 +176,13 @@ def run_thin_slice(
             pass
 
     with trace.span("rom_built"):
-        rom = rom_builder.build(trace_id=trace.trace_id, session_id=session.session_id, person_id=person_id, tool_result=tool_result)
+        rom = rom_builder.build(
+            trace_id=trace.trace_id,
+            session_id=session.session_id,
+            person_id=person_id,
+            tool_result=tool_result,
+            policy=policy,
+        )
 
     renderer_ok = False
     renderer_status: Optional[int] = None
@@ -173,9 +203,19 @@ def run_thin_slice(
     else:
         trace.emit_event("renderer_skipped")
 
-    trace.emit_event("context_write_queued", {"ok": True, "noop": True})
-    with trace.span("context_write_queued", {"ok": True, "noop": True}):
-        pass
+    if clients is not None:
+        with trace.span("context_write_queued", {"ok": True}):
+            batch = write_behind.enqueue_last_interaction(
+                person_id=person_id,
+                session_id=session.session_id,
+                trace_id=trace.trace_id,
+                input_text=text,
+            )
+        write_behind.flush_sync(clients=clients, batch=batch, trace=trace)
+    else:
+        trace.emit_event("context_write_queued", {"ok": True, "noop": True})
+        with trace.span("context_write_queued", {"ok": True, "noop": True}):
+            pass
 
     status = TraceSpanStatus.OK if tool_result.ok and (renderer_url is None or renderer_ok) else TraceSpanStatus.ERROR
     trace.emit_event("completed", {"status": status.value})

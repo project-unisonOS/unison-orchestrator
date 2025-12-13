@@ -98,6 +98,10 @@ UNISON_ENABLE_DEV_ROUTES=true python src/server.py
 # POST /dev/thin-slice {"text":"hello","renderer_url":"http://localhost:8092","trace_dir":"traces"}
 ```
 
+Phase 2 additions:
+- Context snapshot reads require `UNISON_CONTEXT_ROLE=service` (default) to satisfy `unison-context` header guard in dev.
+- Policy gate calls `unison-policy /evaluate` when service clients are available; set `UNISON_POLICY_FAIL_OPEN=true` only for local debugging.
+
 ## Docs
 - Architecture and specs: `unison-docs/dev/unison-architecture-overview.md`
 - Repo roles: `unison-docs/dev/unison-repo-roles.md`
