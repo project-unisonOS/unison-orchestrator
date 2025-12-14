@@ -23,3 +23,20 @@ def test_jsonl_event_graph_store_append_and_query(tmp_path):
     got = store.query(EventGraphQuery(trace_id="t1", limit=10))
     assert [e.event_type for e in got] == ["input_received", "rom_built"]
 
+
+def test_jsonl_event_graph_redacts_sensitive_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNISON_REDACT_EVENT_GRAPH", "true")
+    path = tmp_path / "events.jsonl"
+    store = JsonlEventGraphStore(path=path)
+    evt = new_event(
+        trace_id="t2",
+        event_type="input_received",
+        person_id="p1",
+        session_id="s1",
+        attrs={"authorization": "Bearer abc.def.ghi"},
+        payload={"email": "user@example.com"},
+    )
+    store.append(EventGraphAppend(trace_id="t2", session_id="s1", person_id="p1", events=[evt]))
+    got = store.query(EventGraphQuery(trace_id="t2", limit=10))
+    assert got[0].attrs["authorization"] == "[REDACTED]"
+    assert got[0].payload["email"] == "[REDACTED_EMAIL]"

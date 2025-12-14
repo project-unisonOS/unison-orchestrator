@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from unison_common import EventGraphAppend, EventGraphEvent, EventGraphQuery
+from unison_common.redaction import redact_obj
 
 
 def _now_unix_ms() -> int:
@@ -65,10 +66,14 @@ class JsonlEventGraphStore(EventGraphStore):
         if not events:
             return 0
 
+        redact = os.getenv("UNISON_REDACT_EVENT_GRAPH", "true").lower() in {"1", "true", "yes", "on"}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             for evt in events:
-                f.write(_safe_json(evt.model_dump(mode="json")) + "\n")
+                payload = evt.model_dump(mode="json")
+                if redact:
+                    payload = redact_obj(payload)
+                f.write(_safe_json(payload) + "\n")
         return len(events)
 
     def query(self, query: EventGraphQuery) -> List[EventGraphEvent]:
@@ -130,4 +135,3 @@ def new_event(
         parent_event_id=parent_event_id,
         tags=[],
     )
-
