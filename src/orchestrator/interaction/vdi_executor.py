@@ -36,6 +36,7 @@ class VdiExecutor:
             return ActionResult(action_id=action.action_id, ok=False, error="missing url for vdi task")
 
         payload: Dict[str, Any] = {
+            "action_id": action.action_id,
             "person_id": person_id,
             "url": url,
             "session_id": session_id,
@@ -43,6 +44,8 @@ class VdiExecutor:
             "headers": (action.args or {}).get("headers"),
             "risk_level": action.risk_level,
         }
+        if trace:
+            payload["trace_id"] = trace.trace_id
         # Optional structured args
         if action.name == "vdi.browse":
             payload["actions"] = (action.args or {}).get("actions") or []
@@ -71,4 +74,3 @@ class VdiExecutor:
         if trace:
             trace.emit_event("vdi_task_completed", {"action": action.name})
         return ActionResult(action_id=action.action_id, ok=True, result={"status": status, "body": body or {}})
-

@@ -35,6 +35,7 @@ yarn-debug.log*
 yarn-error.log*
 out/
 .build/
+event_graph/
 *.zip
 *.exe
 *.dmg
