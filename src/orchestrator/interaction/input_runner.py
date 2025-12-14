@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
+from urllib.parse import urlparse
+import threading
 
 from orchestrator.clients import ServiceClients
 from orchestrator.event_graph.store import JsonlEventGraphStore, new_event
@@ -57,6 +59,9 @@ class InputRunResult:
 class RendererEmitter:
     renderer_url: str
 
+    def __post_init__(self) -> None:
+        _ = _renderer_http_client(self.renderer_url)
+
     def emit(self, *, trace_id: str, session_id: str, person_id: Optional[str], type: str, payload: Dict[str, Any]) -> tuple[bool, Optional[int]]:
         envelope: Dict[str, Any] = {
             "type": type,
@@ -72,11 +77,38 @@ class RendererEmitter:
             "traceparent": _format_traceparent(trace_id),
         }
         try:
-            with httpx.Client(timeout=2.0) as client:
-                resp = client.post(f"{self.renderer_url.rstrip('/')}/events", json=envelope, headers=headers)
+            client = _renderer_http_client(self.renderer_url)
+            resp = client.post(f"{self.renderer_url.rstrip('/')}/events", json=envelope, headers=headers)
             return resp.status_code < 400, resp.status_code
         except Exception:
             return False, None
+
+
+_RENDERER_CLIENTS: dict[str, httpx.Client] = {}
+_RENDERER_CLIENT_LOCK = threading.Lock()
+
+
+def _renderer_http_client(renderer_url: str) -> httpx.Client:
+    """
+    Best-effort client reuse to reduce per-interaction connection setup overhead.
+    """
+    key = renderer_url.rstrip("/")
+    with _RENDERER_CLIENT_LOCK:
+        client = _RENDERER_CLIENTS.get(key)
+        if client is not None:
+            return client
+        parsed = urlparse(key)
+        if parsed.scheme and parsed.netloc:
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+        else:
+            base_url = key
+        client = httpx.Client(
+            base_url=base_url,
+            timeout=float(os.getenv("UNISON_RENDERER_EMIT_TIMEOUT_SECONDS", "2.0")),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
+        )
+        _RENDERER_CLIENTS[key] = client
+        return client
 
 
 def run_input_event(
@@ -119,28 +151,10 @@ def run_input_event(
         _ = IntentSession(session_id=sid, trace_id=trace.trace_id, person_id=person_id, created_at_unix_ms=_now_unix_ms())
     _append("session_created", attrs={"session_id": sid})
 
-    router = RouterStage()
-    planner = PlannerStage()
-    policy_gate = PolicyGate(clients=clients)
-    tools = ToolRegistry.default()
-    vdi = VdiExecutor()
-    rom_builder = RomBuilder()
-    context_reader = ContextReader.from_env()
-    write_behind = ContextWriteBehindQueue()
-
-    context_snapshot = None
-    if clients is not None and person_id:
-        context_snapshot = context_reader.read(clients=clients, person_id=person_id, trace=trace)
-        _append("context_snapshot", attrs={"has_profile": context_snapshot.profile is not None, "has_dashboard": context_snapshot.dashboard is not None})
-
-    with trace.span("router_started"):
-        router_out = router.run(input_event, trace)
-    _append("router_completed", attrs=router_out.model_dump(mode="json"))
-
-    # Choose text from input payload.
+    # Choose text from input payload early.
     text = str((input_event.payload or {}).get("text") or (input_event.payload or {}).get("transcript") or "").strip()
 
-    # Early renderer feedback: intent recognized.
+    # Prepare renderer emitter early to minimize time-to-first-feedback.
     renderer_ok = False
     renderer_status: Optional[int] = None
     if renderer_url is None:
@@ -163,10 +177,50 @@ def run_input_event(
         trace.emit_event("renderer_first_feedback", {"ok": renderer_ok, "status": renderer_status})
         _append("renderer_emitted", attrs={"type": "intent.recognized", "ok": renderer_ok, "status": renderer_status})
 
+    router = RouterStage()
+    planner = PlannerStage()
+    policy_gate = PolicyGate(clients=clients)
+    tools = ToolRegistry.default()
+    vdi = VdiExecutor()
+    rom_builder = RomBuilder()
+    context_reader = ContextReader.from_env()
+    write_behind = ContextWriteBehindQueue()
+
+    context_snapshot = None
+    if clients is not None and person_id:
+        context_snapshot = context_reader.read(clients=clients, person_id=person_id, trace=trace)
+        _append("context_snapshot", attrs={"has_profile": context_snapshot.profile is not None, "has_dashboard": context_snapshot.dashboard is not None})
+
+    with trace.span("router_started"):
+        router_out = router.run(input_event, trace)
+    _append("router_completed", attrs=router_out.model_dump(mode="json"))
+
     with trace.span("planner_started"):
         planner_out = planner.run(text=text, trace=trace, context=context_snapshot)
     trace.emit_event("planner_ended", {"intent": planner_out.plan.intent.name, "actions": len(planner_out.plan.actions)})
     _append("planner_output", attrs={"intent": planner_out.plan.intent.name, "actions": len(planner_out.plan.actions)})
+
+    # Optional: emit an early partial ROM update for perceived latency improvements.
+    stream_rom = os.getenv("UNISON_STREAM_ROM", "false").lower() in {"1", "true", "yes", "on"}
+    if emitter and stream_rom:
+        with trace.span("rom_partial_emitted"):
+            ok_p, st_p = emitter.emit(
+                trace_id=trace.trace_id,
+                session_id=sid,
+                person_id=person_id,
+                type="rom.render",
+                payload={
+                    "trace_id": trace.trace_id,
+                    "session_id": sid,
+                    "person_id": person_id,
+                    "blocks": [{"type": "text", "text": "Processing…"}],
+                    "meta": {"partial": True, "origin": "orchestrator"},
+                },
+            )
+            renderer_ok = renderer_ok and ok_p if renderer_ok else ok_p
+            renderer_status = st_p
+        trace.emit_event("renderer_partial_rom", {"ok": ok_p, "status": st_p})
+        _append("renderer_emitted", attrs={"type": "rom.render", "partial": True, "ok": ok_p, "status": st_p})
 
     action = planner_out.plan.actions[0] if planner_out.plan.actions else None
     if action is None:

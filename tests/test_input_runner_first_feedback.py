@@ -29,6 +29,7 @@ def test_input_runner_emits_intent_recognized_before_rom_render(tmp_path, monkey
         return stub
 
     monkeypatch.setattr(input_runner.httpx, "Client", _client_factory)
+    input_runner._RENDERER_CLIENTS.clear()
 
     evt = InputEventEnvelope(
         event_id="e1",
@@ -46,4 +47,3 @@ def test_input_runner_emits_intent_recognized_before_rom_render(tmp_path, monkey
     types = [c["json"]["type"] for c in stub.calls]
     assert types[0] == "intent.recognized"
     assert types[-1] == "rom.render"
-

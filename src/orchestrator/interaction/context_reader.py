@@ -12,6 +12,8 @@ from unison_common import ContextSnapshot, TraceRecorder
 def _now_unix_ms() -> int:
     return int(time.time() * 1000)
 
+_CACHE: dict[str, ContextSnapshot] = {}
+
 
 @dataclass(frozen=True)
 class ContextReader:
@@ -29,6 +31,13 @@ class ContextReader:
         return cls(context_role=os.getenv("UNISON_CONTEXT_ROLE", "service"))
 
     def read(self, *, clients: ServiceClients, person_id: str, trace: TraceRecorder) -> ContextSnapshot:
+        ttl_ms = int(os.getenv("UNISON_CONTEXT_SNAPSHOT_CACHE_TTL_MS", "0"))
+        if ttl_ms > 0:
+            cached = _CACHE.get(person_id)
+            if cached is not None and (_now_unix_ms() - cached.fetched_at_unix_ms) <= ttl_ms:
+                trace.emit_event("context_cache_hit", {"person_id": person_id, "age_ms": _now_unix_ms() - cached.fetched_at_unix_ms})
+                return cached
+
         headers = {"x-test-role": self.context_role} if self.context_role else {}
         profile: Optional[Dict[str, Any]] = None
         dashboard: Optional[Dict[str, Any]] = None
@@ -49,10 +58,12 @@ class ContextReader:
             "context_read_ended",
             {"profile": profile is not None, "dashboard": dashboard is not None, "person_id": person_id},
         )
-        return ContextSnapshot(
+        snapshot = ContextSnapshot(
             person_id=person_id,
             profile=profile,
             dashboard=dashboard,
             fetched_at_unix_ms=_now_unix_ms(),
         )
-
+        if ttl_ms > 0:
+            _CACHE[person_id] = snapshot
+        return snapshot
