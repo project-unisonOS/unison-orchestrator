@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 import logging
 import time
+import asyncio
 import uvicorn
 import os
 from datetime import datetime
@@ -232,6 +233,53 @@ if os.getenv("UNISON_ENABLE_EVENT_GRAPH_ROUTES", "false").lower() in {"1", "true
 if os.getenv("UNISON_ENABLE_INPUT_ROUTES", "true").lower() in {"1", "true", "yes", "on"}:
     register_input_routes(app)
     logger.info("Input routes enabled: POST /input")
+
+@app.on_event("startup")
+async def _power_on_startup() -> None:
+    """
+    Power-on controller (best-effort).
+
+    Emits staged boot envelopes to the experience renderer and records an initial trace artifact.
+    """
+    if os.getenv("UNISON_POWERON_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+        return
+    try:
+        from orchestrator.power_on.controller import PowerOnController
+
+        controller = PowerOnController(
+            clients=service_clients,
+            trace_dir=str(os.getenv("UNISON_TRACE_DIR", "traces")),
+        )
+
+        async def _runner():
+            try:
+                result = await controller.run()
+                app.state.poweron = result
+                # Start the dev voice loop when speech is available.
+                try:
+                    from orchestrator.power_on.voice_loop import VoiceIntentLoop, VoiceLoopConfig
+
+                    if getattr(result, "speech_ready", False) and getattr(result, "renderer_url", None):
+                        loop = VoiceIntentLoop(
+                            VoiceLoopConfig(
+                                trace=result.trace,
+                                manifest=result.manifest,
+                                clients=getattr(app.state, "service_clients", None),
+                                renderer_url=result.renderer_url,
+                                trace_dir=str(os.getenv("UNISON_TRACE_DIR", "traces")),
+                            )
+                        )
+                        app.state.voice_loop = loop
+                        app.state.speechio = loop.speechio
+                        app.state.voice_loop_task = asyncio.create_task(loop.run())
+                except Exception as exc:
+                    logger.warning("voice loop failed to start: %s", exc)
+            except Exception as exc:
+                logger.warning("power-on controller failed: %s", exc)
+
+        app.state.poweron_task = asyncio.create_task(_runner())
+    except Exception as exc:
+        logger.warning("power-on controller unavailable: %s", exc)
 
 @app.get("/capabilities")
 async def capabilities():

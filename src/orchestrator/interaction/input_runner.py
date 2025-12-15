@@ -117,8 +117,10 @@ def run_input_event(
     clients: ServiceClients | None,
     trace_dir: str = "traces",
     renderer_url: Optional[str] = None,
+    trace: TraceRecorder | None = None,
+    write_trace: bool = True,
 ) -> InputRunResult:
-    trace = TraceRecorder(service="unison-orchestrator.input", trace_id=input_event.trace_id or None)
+    trace = trace or TraceRecorder(service="unison-orchestrator.input", trace_id=input_event.trace_id or None)
     sid = input_event.session_id or f"session-{uuid.uuid4().hex[:8]}"
     person_id = input_event.person_id
 
@@ -175,6 +177,7 @@ def run_input_event(
                 payload={"person_id": person_id, "session_id": sid},
             )
         trace.emit_event("renderer_first_feedback", {"ok": renderer_ok, "status": renderer_status})
+        trace.emit_event("renderer.emitted_first_feedback", {"ok": renderer_ok, "status": renderer_status})
         _append("renderer_emitted", attrs={"type": "intent.recognized", "ok": renderer_ok, "status": renderer_status})
 
     router = RouterStage()
@@ -195,9 +198,11 @@ def run_input_event(
         router_out = router.run(input_event, trace)
     _append("router_completed", attrs=router_out.model_dump(mode="json"))
 
+    trace.emit_event("planner.start", {})
     with trace.span("planner_started"):
         planner_out = planner.run(text=text, trace=trace, context=context_snapshot)
     trace.emit_event("planner_ended", {"intent": planner_out.plan.intent.name, "actions": len(planner_out.plan.actions)})
+    trace.emit_event("planner.end", {"intent": planner_out.plan.intent.name, "actions": len(planner_out.plan.actions)})
     _append("planner_output", attrs={"intent": planner_out.plan.intent.name, "actions": len(planner_out.plan.actions)})
 
     # Optional: emit an early partial ROM update for perceived latency improvements.
@@ -227,7 +232,7 @@ def run_input_event(
         tool_result = ActionResult(action_id="none", ok=False, error="planner produced no actions")
         policy = PolicyDecision(allowed=False, reason="no actions")
         rom = rom_builder.build(trace_id=trace.trace_id, session_id=sid, person_id=person_id or "unknown", tool_result=tool_result, policy=policy)
-        trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json"))
+        trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json")) if write_trace else ""
         return InputRunResult(
             trace_id=trace.trace_id,
             session_id=sid,
@@ -260,6 +265,7 @@ def run_input_event(
             action.args.setdefault("person_id", person_id)
             action.args.setdefault("session_id", sid)
         with trace.span("tool_started", {"tool": action.name, "kind": action.kind}):
+            trace.emit_event("tool.start", {"tool": action.name, "kind": action.kind})
             if action.kind == "vdi":
                 if emitter:
                     emitter.emit(
@@ -276,6 +282,7 @@ def run_input_event(
                 )
             else:
                 tool_result = tools.execute(action)
+        trace.emit_event("tool.end", {"tool": action.name, "ok": tool_result.ok})
         trace.emit_event("tool_ended", {"ok": tool_result.ok})
         if emitter and action.kind == "vdi":
             emitter.emit(
@@ -295,6 +302,7 @@ def run_input_event(
             tool_result=tool_result,
             policy=policy,
         )
+    trace.emit_event("rom.built", {})
     _append("rom_built")
 
     if emitter:
@@ -323,7 +331,7 @@ def run_input_event(
     trace.emit_event("completed", {"status": status.value})
     _append("completed", attrs={"status": status.value})
 
-    trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json"))
+    trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json")) if write_trace else ""
     return InputRunResult(
         trace_id=trace.trace_id,
         session_id=sid,

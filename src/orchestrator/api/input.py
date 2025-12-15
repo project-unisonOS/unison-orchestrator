@@ -9,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from orchestrator.interaction.input_runner import run_input_event
 from unison_common import InputEventEnvelope
 from unison_common.auth import verify_token
+from unison_common.contracts.v1.speechio import TranscriptEvent
 
 _security = HTTPBearer(auto_error=False)
 
@@ -38,6 +39,21 @@ def register_input_routes(app) -> None:
         _user: Dict[str, Any] = Depends(_optional_auth),
     ):
         input_event = InputEventEnvelope(**body)
+        # Speech streaming events are ingested into the SpeechIO adapter (if enabled)
+        # and handled asynchronously by the voice loop.
+        if input_event.modality == "speech":
+            payload = input_event.payload or {}
+            speechio_payload = payload.get("speechio") if isinstance(payload, dict) else None
+            if isinstance(speechio_payload, dict) and isinstance(speechio_payload.get("type"), str):
+                adapter = getattr(app.state, "speechio", None)
+                if adapter is not None:
+                    try:
+                        evt = TranscriptEvent(**speechio_payload)
+                        adapter.ingest(evt)
+                        return {"ok": True, "trace_id": input_event.trace_id, "streaming": True}
+                    except Exception:
+                        return {"ok": False, "trace_id": input_event.trace_id, "streaming": True, "error": "invalid_speechio_event"}
+
         clients = getattr(app.state, "service_clients", None)
         result = run_input_event(
             input_event=input_event,
@@ -57,4 +73,3 @@ def register_input_routes(app) -> None:
         }
 
     app.include_router(api)
-
