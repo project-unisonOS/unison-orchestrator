@@ -259,7 +259,8 @@ async def _power_on_startup() -> None:
                 try:
                     from orchestrator.power_on.voice_loop import VoiceIntentLoop, VoiceLoopConfig
 
-                    if getattr(result, "speech_ready", False) and getattr(result, "renderer_url", None):
+                    allow_headless_voice = os.getenv("UNISON_HEADLESS_VOICE_LOOP", "false").lower() in {"1", "true", "yes", "on"}
+                    if getattr(result, "speech_ready", False) and (getattr(result, "renderer_url", None) or allow_headless_voice):
                         loop = VoiceIntentLoop(
                             VoiceLoopConfig(
                                 trace=result.trace,

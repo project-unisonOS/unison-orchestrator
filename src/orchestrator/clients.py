@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .config import ServiceEndpoints
 from unison_common.baton import get_current_baton
+import os
 from unison_common.http_client import (
     http_get_json_with_retry,
     http_post_json_with_retry,
@@ -21,6 +22,7 @@ _CALL_DEFAULTS = dict(max_retries=3, base_delay=0.1, max_delay=2.0, timeout=2.0)
 class ServiceHttpClient:
     host: str
     port: str
+    timeout_seconds: float = 2.0
 
     def get(self, path: str, *, headers: Optional[Dict[str, str]] = None) -> HttpResult:
         merged_headers = dict(headers or {})
@@ -32,7 +34,7 @@ class ServiceHttpClient:
             self.port,
             path,
             headers=merged_headers or None,
-            **_CALL_DEFAULTS,
+            **{**_CALL_DEFAULTS, "timeout": float(self.timeout_seconds)},
         )
 
     def post(
@@ -52,7 +54,7 @@ class ServiceHttpClient:
             path,
             payload,
             headers=merged_headers or None,
-            **_CALL_DEFAULTS,
+            **{**_CALL_DEFAULTS, "timeout": float(self.timeout_seconds)},
         )
 
     def put(
@@ -72,7 +74,7 @@ class ServiceHttpClient:
             path,
             payload,
             headers=merged_headers or None,
-            **_CALL_DEFAULTS,
+            **{**_CALL_DEFAULTS, "timeout": float(self.timeout_seconds)},
         )
 
 
@@ -89,6 +91,9 @@ class ServiceClients:
 
     @classmethod
     def from_endpoints(cls, endpoints: ServiceEndpoints) -> "ServiceClients":
+        # Inference requests can be slow (first-token latency, model warmup).
+        # Keep this high by default and allow env override for tighter loops.
+        inference_timeout = float(os.getenv("UNISON_INFERENCE_HTTP_TIMEOUT_SECONDS", "60.0"))
         payments_client = None
         if endpoints.payments_host and endpoints.payments_port:
             payments_client = ServiceHttpClient(endpoints.payments_host, endpoints.payments_port)
@@ -105,7 +110,7 @@ class ServiceClients:
             context=ServiceHttpClient(endpoints.context_host, endpoints.context_port),
             storage=ServiceHttpClient(endpoints.storage_host, endpoints.storage_port),
             policy=ServiceHttpClient(endpoints.policy_host, endpoints.policy_port),
-            inference=ServiceHttpClient(endpoints.inference_host, endpoints.inference_port),
+            inference=ServiceHttpClient(endpoints.inference_host, endpoints.inference_port, timeout_seconds=inference_timeout),
             comms=comms_client,
             actuation=actuation_client,
             consent=consent_client,

@@ -4,13 +4,14 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 from asyncio import QueueFull
 
 from orchestrator.interaction.input_runner import RendererEmitter
-from unison_common import TraceRecorder
+from unison_common import Phase1NdjsonTrace, TraceRecorder
 from unison_common.contracts.v1.speechio import (
     AsrProfile,
     EndpointingPolicy,
@@ -30,7 +31,7 @@ def _now_monotonic_ns() -> int:
 class _CaptureState:
     active: bool = False
     asr_profile: AsrProfile = "fast"
-    endpointing: EndpointingPolicy = EndpointingPolicy()
+    endpointing: EndpointingPolicy = field(default_factory=EndpointingPolicy)
 
 
 class IngressSpeechIOAdapter:
@@ -46,6 +47,7 @@ class IngressSpeechIOAdapter:
     def __init__(self) -> None:
         self._initialized = False
         self._trace: Optional[TraceRecorder] = None
+        self._phase1_trace: Optional[Phase1NdjsonTrace] = None
         self._renderer_url: Optional[str] = None
         self._renderer_emitter: Optional[RendererEmitter] = None
         self._speech_http_url: Optional[str] = None
@@ -65,6 +67,7 @@ class IngressSpeechIOAdapter:
         self._speaking_lock = asyncio.Lock()
         self._speaking = False
         self._tts_profile: str = "lightweight"
+        self._speaking_trace_id: Optional[str] = None
 
     async def initialize(self, config: dict) -> None:
         self._renderer_url = (config.get("renderer_url") or os.getenv("UNISON_RENDERER_URL") or "").rstrip("/") or None
@@ -72,6 +75,8 @@ class IngressSpeechIOAdapter:
             self._renderer_emitter = RendererEmitter(self._renderer_url)
         self._speech_http_url = (config.get("speech_http_url") or os.getenv("UNISON_IO_SPEECH_URL") or "").rstrip("/") or None
         self._trace = config.get("trace") if isinstance(config.get("trace"), TraceRecorder) else None
+        if os.getenv("UNISON_PHASE1_TRACE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}:
+            self._phase1_trace = Phase1NdjsonTrace.from_env()
 
         self._initialized = True
         self._status = SpeechStatus(ready=True, reason=None)
@@ -139,6 +144,32 @@ class IngressSpeechIOAdapter:
         event.profile = event.profile or self._capture.asr_profile
         event.engine = event.engine or "io-speech.stub"
 
+        if self._phase1_trace and self._trace:
+            if event.type == "partial":
+                self._phase1_trace.emit(
+                    trace_id=self._trace.trace_id,
+                    source="speech.asr",
+                    type="speech.asr.partial",
+                    level="info",
+                    payload={"text_len": len((event.text or "").strip()), "engine": event.engine, "profile": event.profile},
+                )
+            elif event.type == "final":
+                self._phase1_trace.emit(
+                    trace_id=self._trace.trace_id,
+                    source="speech.asr",
+                    type="speech.asr.final",
+                    level="info",
+                    payload={"text_len": len((event.text or "").strip()), "engine": event.engine, "profile": event.profile},
+                )
+            elif event.type == "vad_start" and self._speaking:
+                self._phase1_trace.emit(
+                    trace_id=self._trace.trace_id,
+                    source="speech.tts",
+                    type="speech.tts.barge_in",
+                    level="info",
+                    payload={"reason": "vad_start"},
+                )
+
         if event.type == "vad_start":
             # Hard interrupt contract enforced inside SpeechIO.
             if self._speaking:
@@ -154,8 +185,6 @@ class IngressSpeechIOAdapter:
     async def speak(self, text: str, options: SpeakOptions) -> SpeakResult:
         if not self._initialized:
             return SpeakResult(ok=False, error="SpeechIO not initialized")
-        if not self._renderer_emitter:
-            return SpeakResult(ok=False, error="renderer unavailable")
         if not self._speech_http_url:
             return SpeakResult(ok=False, error="speech service unavailable")
 
@@ -166,8 +195,17 @@ class IngressSpeechIOAdapter:
             self._speaking = True
             self._status.active_tts_profile = profile
             self._status.chosen_tts_engine = "io-speech.stub"
+            self._speaking_trace_id = self._trace.trace_id if self._trace else None
             if self._trace:
                 self._trace.emit_event("tts.start", {"tts_profile": profile, "engine": "io-speech.stub"})
+            if self._phase1_trace and self._trace:
+                self._phase1_trace.emit(
+                    trace_id=self._trace.trace_id,
+                    source="speech.tts",
+                    type="speech.tts.start",
+                    level="info",
+                    payload={"tts_profile": profile, "engine": "io-speech.stub"},
+                )
 
             audio_url: Optional[str] = None
             try:
@@ -182,28 +220,53 @@ class IngressSpeechIOAdapter:
                 self._speaking = False
                 if self._trace:
                     self._trace.emit_event("tts.end", {"ok": False, "error": str(exc)})
+                if self._phase1_trace and self._trace:
+                    self._phase1_trace.emit(
+                        trace_id=self._trace.trace_id,
+                        source="speech.tts",
+                        type="speech.tts.stop",
+                        level="warn",
+                        payload={"ok": False, "error": str(exc)},
+                    )
                 return SpeakResult(ok=False, error=str(exc), engine="io-speech.stub", profile=profile)
 
             if not isinstance(audio_url, str) or not audio_url:
                 self._speaking = False
                 if self._trace:
                     self._trace.emit_event("tts.end", {"ok": False, "error": "missing_audio_url"})
+                if self._phase1_trace and self._trace:
+                    self._phase1_trace.emit(
+                        trace_id=self._trace.trace_id,
+                        source="speech.tts",
+                        type="speech.tts.stop",
+                        level="warn",
+                        payload={"ok": False, "error": "missing_audio_url"},
+                    )
                 return SpeakResult(ok=False, error="missing_audio_url", engine="io-speech.stub", profile=profile)
 
-            # Best-effort: renderer is instructed to play; may fail due to autoplay policy.
-            self._renderer_emitter.emit(
-                trace_id=self._trace.trace_id if self._trace else os.getenv("UNISON_TRACE_ID", "tts"),
-                session_id="voice-loop",
-                person_id=None,
-                type="tts.play",
-                payload={"audio_url": audio_url, "allow_barge_in": allow_barge_in, "profile": profile},
-            )
-            if self._trace:
-                self._trace.emit_event("tts.first_audio", {"best_effort": True})
+            # Best-effort playback: if a renderer is available, ask it to play; otherwise remain headless.
+            if self._renderer_emitter:
+                self._renderer_emitter.emit(
+                    trace_id=self._trace.trace_id if self._trace else os.getenv("UNISON_TRACE_ID", "tts"),
+                    session_id="voice-loop",
+                    person_id=None,
+                    type="tts.play",
+                    payload={"audio_url": audio_url, "allow_barge_in": allow_barge_in, "profile": profile},
+                )
+                if self._trace:
+                    self._trace.emit_event("tts.first_audio", {"best_effort": True})
 
             # No reliable completion callback in this dev wiring; treat as ended once enqueued.
             if self._trace:
                 self._trace.emit_event("tts.end", {"ok": True})
+            if self._phase1_trace and self._trace:
+                self._phase1_trace.emit(
+                    trace_id=self._trace.trace_id,
+                    source="speech.tts",
+                    type="speech.tts.stop",
+                    level="info",
+                    payload={"ok": True, "audio_url": "present" if bool(audio_url) else "missing"},
+                )
 
             return SpeakResult(ok=True, engine="io-speech.stub", profile=profile, audio_url=audio_url)
 
@@ -214,6 +277,22 @@ class IngressSpeechIOAdapter:
             self._speaking = False
             if reason == "barge_in" and self._trace:
                 self._trace.emit_event("tts.interrupt.barge_in", {})
+            if reason == "barge_in" and self._phase1_trace and self._trace:
+                self._phase1_trace.emit(
+                    trace_id=self._trace.trace_id,
+                    source="speech.tts",
+                    type="speech.tts.barge_in",
+                    level="info",
+                    payload={"reason": "barge_in"},
+                )
+            if self._phase1_trace and self._trace:
+                self._phase1_trace.emit(
+                    trace_id=self._trace.trace_id,
+                    source="speech.tts",
+                    type="speech.tts.stop",
+                    level="info",
+                    payload={"ok": True, "reason": reason or "cancel"},
+                )
             if self._renderer_emitter:
                 self._renderer_emitter.emit(
                     trace_id=self._trace.trace_id if self._trace else os.getenv("UNISON_TRACE_ID", "tts"),

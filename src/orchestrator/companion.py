@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 _RENDERER_URL = os.getenv("UNISON_RENDERER_URL")
 _IO_SPEECH_URL = os.getenv("UNISON_IO_SPEECH_URL")
 _CONTEXT_GRAPH_URL = os.getenv("UNISON_CONTEXT_GRAPH_URL")
+_PHASE1_BOUNDARIES = os.getenv("UNISON_PHASE1_MODE", "false").lower() in {"1", "true", "yes", "on"}
 
 @dataclass
 class ToolDescriptor:
@@ -198,8 +199,9 @@ class CompanionSessionManager:
             "session_id": session_id,
             "messages": [system_message] + prior_turns + messages,
             "attachments": attachments,
-            "tools": self._registry.list_llm_tools(),
-            "tool_choice": payload.get("tool_choice", "auto"),
+            # Phase 1 boundaries: the interaction model must not originate tool calls.
+            "tools": [] if _PHASE1_BOUNDARIES else self._registry.list_llm_tools(),
+            "tool_choice": "none" if _PHASE1_BOUNDARIES else payload.get("tool_choice", "auto"),
             "response_format": payload.get("response_format", "text-and-tools"),
         }
 
@@ -215,6 +217,10 @@ class CompanionSessionManager:
         tool_calls = body.get("tool_calls") or []
         tool_activity: List[Dict[str, Any]] = []
         final_body = body
+        if tool_calls and _PHASE1_BOUNDARIES:
+            logger.warning("Phase 1 boundary: ignoring model tool_calls in companion flow (person_id=%s session_id=%s)", person_id, session_id)
+            tool_activity.append({"tool": "boundary", "status": "blocked", "detail": "interaction_model_tool_calls_disallowed"})
+            tool_calls = []
         if tool_calls:
             tool_messages, tool_activity = self._execute_tool_calls(tool_calls, person_id, event_id)
             followup_messages = list(prior_turns + messages)

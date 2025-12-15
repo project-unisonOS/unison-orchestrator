@@ -7,6 +7,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from orchestrator.interaction.input_runner import run_input_event
+from orchestrator.phase1.runner import Phase1RunConfig, run_phase1_input_event
 from unison_common import InputEventEnvelope
 from unison_common.auth import verify_token
 from unison_common.contracts.v1.speechio import TranscriptEvent
@@ -55,12 +56,22 @@ def register_input_routes(app) -> None:
                         return {"ok": False, "trace_id": input_event.trace_id, "streaming": True, "error": "invalid_speechio_event"}
 
         clients = getattr(app.state, "service_clients", None)
-        result = run_input_event(
-            input_event=input_event,
-            clients=clients,
-            trace_dir=str(os.getenv("UNISON_TRACE_DIR", "traces")),
-            renderer_url=os.getenv("UNISON_RENDERER_URL") or os.getenv("UNISON_EXPERIENCE_RENDERER_URL"),
-        )
+        trace_dir = str(os.getenv("UNISON_TRACE_DIR", "traces"))
+        renderer_url = os.getenv("UNISON_RENDERER_URL") or os.getenv("UNISON_EXPERIENCE_RENDERER_URL")
+        use_phase1 = os.getenv("UNISON_PHASE1_PIPELINE", "false").lower() in {"1", "true", "yes", "on"}
+        if use_phase1:
+            result = run_phase1_input_event(
+                input_event=input_event,
+                clients=clients,
+                cfg=Phase1RunConfig(trace_dir=trace_dir, renderer_url=renderer_url),
+            )
+        else:
+            result = run_input_event(
+                input_event=input_event,
+                clients=clients,
+                trace_dir=trace_dir,
+                renderer_url=renderer_url,
+            )
         return {
             "ok": result.tool_result.ok,
             "trace_id": result.trace_id,

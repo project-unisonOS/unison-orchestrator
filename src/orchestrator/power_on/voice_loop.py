@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from orchestrator.clients import ServiceClients
 from orchestrator.interaction.input_runner import RendererEmitter, run_input_event
+from orchestrator.phase1.runner import Phase1RunConfig, run_phase1_input_event
 from orchestrator.speechio.ingress_adapter import IngressSpeechIOAdapter
 from unison_common import InputEventEnvelope, TraceRecorder
 from unison_common.contracts.v1.speechio import EndpointingPolicy, SpeakOptions, TranscriptEvent
@@ -41,6 +42,7 @@ class VoiceIntentLoop:
         self._cfg = cfg
         self._speechio = IngressSpeechIOAdapter()
         self._renderer_emitter = RendererEmitter(cfg.renderer_url) if cfg.renderer_url else None
+        self._default_person_id = os.getenv("UNISON_DEFAULT_PERSON_ID", "local-person")
         self._first_partial = False
         self._first_feedback_emitted = False
 
@@ -93,7 +95,7 @@ class VoiceIntentLoop:
                 ok, st = self._renderer_emitter.emit(
                     trace_id=trace.trace_id,
                     session_id="voice-loop",
-                    person_id=None,
+                    person_id=self._default_person_id,
                     type="speech.partial",
                     payload={"text": text},
                 )
@@ -119,19 +121,26 @@ class VoiceIntentLoop:
             source="speechio",
             modality="speech",
             payload={"text": final_text, "transcript": final_text},
-            person_id=None,
+            person_id=self._default_person_id,
             session_id="voice-loop",
             auth={},
         )
 
-        result = run_input_event(
-            input_event=input_event,
-            clients=self._cfg.clients,
-            trace_dir=self._cfg.trace_dir,
-            renderer_url=self._cfg.renderer_url,
-            trace=trace,
-            write_trace=False,
-        )
+        if os.getenv("UNISON_PHASE1_PIPELINE", "false").lower() in {"1", "true", "yes", "on"}:
+            result = run_phase1_input_event(
+                input_event=input_event,
+                clients=self._cfg.clients,
+                cfg=Phase1RunConfig(trace_dir=self._cfg.trace_dir, renderer_url=self._cfg.renderer_url),
+            )
+        else:
+            result = run_input_event(
+                input_event=input_event,
+                clients=self._cfg.clients,
+                trace_dir=self._cfg.trace_dir,
+                renderer_url=self._cfg.renderer_url,
+                trace=trace,
+                write_trace=False,
+            )
 
         # Speak response summary (best-effort).
         summary = _best_effort_summary(result.rom.model_dump(mode="json"))
