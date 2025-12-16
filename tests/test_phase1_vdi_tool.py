@@ -28,6 +28,7 @@ class _ClientsStub:
 
 def test_phase1_planner_vdi_allowlist_allows_example_com(monkeypatch):
     monkeypatch.setenv("UNISON_PHASE1_VDI_ALLOWLIST_DOMAINS", "example.com")
+    monkeypatch.setenv("UNISON_PLANNER_MODE", "stub")
     validator = Phase1SchemaValidator.load()
     planner = Phase1Planner(validator=validator)
     profile = {"onboarding": {"completed": True}}
@@ -40,6 +41,7 @@ def test_phase1_planner_vdi_allowlist_allows_example_com(monkeypatch):
 
 def test_phase1_planner_vdi_non_allowlisted_requires_confirm(monkeypatch):
     monkeypatch.setenv("UNISON_PHASE1_VDI_ALLOWLIST_DOMAINS", "example.com")
+    monkeypatch.setenv("UNISON_PLANNER_MODE", "stub")
     validator = Phase1SchemaValidator.load()
     planner = Phase1Planner(validator=validator)
     profile = {"onboarding": {"completed": True}}

@@ -81,6 +81,9 @@ class VoiceIntentLoop:
 
     async def _handle_event(self, evt: TranscriptEvent) -> None:
         trace = self._cfg.trace
+        attrs = evt.attrs if isinstance(evt.attrs, dict) else {}
+        person_id = attrs.get("person_id") if isinstance(attrs.get("person_id"), str) and attrs.get("person_id") else self._default_person_id
+        session_id = attrs.get("session_id") if isinstance(attrs.get("session_id"), str) and attrs.get("session_id") else "voice-loop"
 
         if evt.type == "vad_start":
             trace.emit_event("speech.vad_start", {"engine": evt.engine, "asr_profile": evt.profile})
@@ -94,8 +97,8 @@ class VoiceIntentLoop:
             if text and self._renderer_emitter:
                 ok, st = self._renderer_emitter.emit(
                     trace_id=trace.trace_id,
-                    session_id="voice-loop",
-                    person_id=self._default_person_id,
+                    session_id=session_id,
+                    person_id=person_id,
                     type="speech.partial",
                     payload={"text": text},
                 )
@@ -121,8 +124,8 @@ class VoiceIntentLoop:
             source="speechio",
             modality="speech",
             payload={"text": final_text, "transcript": final_text},
-            person_id=self._default_person_id,
-            session_id="voice-loop",
+            person_id=person_id,
+            session_id=session_id,
             auth={},
         )
 

@@ -56,9 +56,9 @@ class IngressSpeechIOAdapter:
             streaming_partials=True,
             barge_in=True,
             endpointing=True,
-            local_asr=False,
-            neural_tts=False,
-            engines={"asr": ["io-speech.stub"], "tts": ["io-speech.stub"]},
+            local_asr=True,
+            neural_tts=True,
+            engines={"asr": ["faster-whisper"], "tts": ["piper"]},
         )
 
         self._capture = _CaptureState()
@@ -109,7 +109,7 @@ class IngressSpeechIOAdapter:
         self._capture.asr_profile = asr_profile
         self._capture.endpointing = endpointing
         self._status.active_asr_profile = asr_profile
-        self._status.chosen_asr_engine = "io-speech.stub"
+        self._status.chosen_asr_engine = "faster-whisper"
 
         if self._trace:
             self._trace.emit_event(
@@ -142,7 +142,7 @@ class IngressSpeechIOAdapter:
         if event.ts_monotonic_ns is None:
             event.ts_monotonic_ns = _now_monotonic_ns()
         event.profile = event.profile or self._capture.asr_profile
-        event.engine = event.engine or "io-speech.stub"
+        event.engine = event.engine or "faster-whisper"
 
         if self._phase1_trace and self._trace:
             if event.type == "partial":
@@ -194,17 +194,17 @@ class IngressSpeechIOAdapter:
         async with self._speaking_lock:
             self._speaking = True
             self._status.active_tts_profile = profile
-            self._status.chosen_tts_engine = "io-speech.stub"
+            self._status.chosen_tts_engine = "piper"
             self._speaking_trace_id = self._trace.trace_id if self._trace else None
             if self._trace:
-                self._trace.emit_event("tts.start", {"tts_profile": profile, "engine": "io-speech.stub"})
+                self._trace.emit_event("tts.start", {"tts_profile": profile, "engine": self._status.chosen_tts_engine})
             if self._phase1_trace and self._trace:
                 self._phase1_trace.emit(
                     trace_id=self._trace.trace_id,
                     source="speech.tts",
                     type="speech.tts.start",
                     level="info",
-                    payload={"tts_profile": profile, "engine": "io-speech.stub"},
+                    payload={"tts_profile": profile, "engine": self._status.chosen_tts_engine},
                 )
 
             audio_url: Optional[str] = None
@@ -212,10 +212,13 @@ class IngressSpeechIOAdapter:
                 async with httpx.AsyncClient(timeout=3.0) as client:
                     resp = await client.post(
                         f"{self._speech_http_url.rstrip('/')}/speech/tts",
-                        json={"text": text, "person_id": None, "session_id": "voice-loop"},
+                        json={"text": text, "profile": profile, "person_id": None, "session_id": "voice-loop"},
                     )
                     body = resp.json() if resp.status_code == 200 else {}
                     audio_url = body.get("audio_url") if isinstance(body, dict) else None
+                    engine_name = body.get("engine") if isinstance(body, dict) else None
+                    if isinstance(engine_name, str) and engine_name.strip():
+                        self._status.chosen_tts_engine = engine_name.strip()
             except Exception as exc:
                 self._speaking = False
                 if self._trace:
@@ -228,7 +231,7 @@ class IngressSpeechIOAdapter:
                         level="warn",
                         payload={"ok": False, "error": str(exc)},
                     )
-                return SpeakResult(ok=False, error=str(exc), engine="io-speech.stub", profile=profile)
+                return SpeakResult(ok=False, error=str(exc), engine=self._status.chosen_tts_engine, profile=profile)
 
             if not isinstance(audio_url, str) or not audio_url:
                 self._speaking = False
@@ -242,7 +245,7 @@ class IngressSpeechIOAdapter:
                         level="warn",
                         payload={"ok": False, "error": "missing_audio_url"},
                     )
-                return SpeakResult(ok=False, error="missing_audio_url", engine="io-speech.stub", profile=profile)
+                return SpeakResult(ok=False, error="missing_audio_url", engine=self._status.chosen_tts_engine, profile=profile)
 
             # Best-effort playback: if a renderer is available, ask it to play; otherwise remain headless.
             if self._renderer_emitter:
@@ -268,7 +271,7 @@ class IngressSpeechIOAdapter:
                     payload={"ok": True, "audio_url": "present" if bool(audio_url) else "missing"},
                 )
 
-            return SpeakResult(ok=True, engine="io-speech.stub", profile=profile, audio_url=audio_url)
+            return SpeakResult(ok=True, engine=self._status.chosen_tts_engine, profile=profile, audio_url=audio_url)
 
     async def stopSpeaking(self, reason: Optional[str] = None) -> None:
         async with self._speaking_lock:

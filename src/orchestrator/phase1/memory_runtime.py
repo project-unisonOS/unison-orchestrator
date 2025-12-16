@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from orchestrator.clients import ServiceClients
+from orchestrator.interaction.context_reader import invalidate_context_cache
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,8 @@ class Phase1MemoryRuntime:
                 {"profile": next_profile},
                 headers={"x-test-role": "service"},
             )
+            if ok_w and status_w < 400:
+                invalidate_context_cache(person_id)
             return MemoryOpResult(
                 op_id=op_id,
                 ok=bool(ok_w and status_w < 400),
@@ -104,6 +107,8 @@ class Phase1MemoryRuntime:
                 {"profile": next_profile},
                 headers={"x-test-role": "service"},
             )
+            if ok_w and status_w < 400:
+                invalidate_context_cache(person_id)
             return MemoryOpResult(
                 op_id=op_id,
                 ok=bool(ok_w and status_w < 400),
@@ -115,4 +120,3 @@ class Phase1MemoryRuntime:
 
 
 __all__ = ["Phase1MemoryRuntime", "MemoryOpResult"]
-

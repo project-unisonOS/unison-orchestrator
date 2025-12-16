@@ -30,9 +30,8 @@ from unison_common import (
     ResponseObjectModel,
     TraceRecorder,
     TraceSpanStatus,
-    sha256_text,
 )
-from unison_common.prompt.engine import PromptEngine
+from unison_common.prompt import compile_injected_system_prompt
 
 
 def _now_unix_ms() -> int:
@@ -119,38 +118,6 @@ def _phase1_trace_enabled() -> bool:
     if raw is None:
         return bool(os.getenv("UNISON_PHASE1_TRACE_PATH"))
     return raw.lower() in {"1", "true", "yes", "on"}
-
-
-def _phase1_verify_prompt_injection_enabled() -> bool:
-    raw = os.getenv("UNISON_PHASE1_VERIFY_PROMPT_INJECTION", "true")
-    return raw.lower() in {"1", "true", "yes", "on"}
-
-
-def _phase1_infer(
-    *,
-    clients: ServiceClients | None,
-    event_id: str,
-    trace_id: str,
-    person_id: Optional[str],
-    session_id: str,
-    target: str,
-    messages: list[dict[str, Any]],
-) -> tuple[bool, int, dict[str, Any] | None]:
-    if clients is None:
-        return False, 0, {"error": "clients not configured"}
-    ok, status, body = clients.inference.post(
-        "/inference/request",
-        {
-            "intent": f"phase1.{target}.call",
-            "person_id": person_id or "anonymous",
-            "session_id": session_id,
-            "messages": messages,
-            "max_tokens": 300,
-            "temperature": 0.2,
-        },
-        headers={"X-Event-ID": event_id, "X-Trace-ID": trace_id},
-    )
-    return ok, status, body
 
 
 def run_input_event(
@@ -245,83 +212,24 @@ def run_input_event(
         context_snapshot = context_reader.read(clients=clients, person_id=person_id, trace=trace)
         _append("context_snapshot", attrs={"has_profile": context_snapshot.profile is not None, "has_dashboard": context_snapshot.dashboard is not None})
 
-    if phase1_trace and _phase1_verify_prompt_injection_enabled():
-        try:
-            engine = PromptEngine.for_person(person_id=person_id)
-            compiled = engine.compile(
-                session_context={
-                    "intent": "phase1.prompt_injection.verify",
-                    "session_id": sid,
-                    "person_id": person_id or "anonymous",
-                    "timestamp": time.time(),
-                }
-            )
-            system_prompt = compiled.markdown
-            config_path = str(engine.layout.active_prompt_path)
-            config_hash = sha256_text(system_prompt)
-
-            phase1_trace.emit(
-                trace_id=trace.trace_id,
-                source="planner_model",
-                type="prompt.injection.applied",
-                level="info",
-                payload={"target": "planner_model", "config_path": config_path, "config_hash": config_hash},
-                redactions=["prompt_content"],
-            )
-            ok_p, st_p, _ = _phase1_infer(
-                clients=clients,
-                event_id=trace.trace_id,
-                trace_id=trace.trace_id,
-                person_id=person_id,
-                session_id=sid,
-                target="planner_model",
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Plan (internal): {text}"}],
-            )
-            if not ok_p or st_p >= 400:
-                phase1_trace.emit(
-                    trace_id=trace.trace_id,
-                    source="planner_model",
-                    type="error",
-                    level="warn",
-                    payload={"stage": "planner_model.call", "status": st_p, "ok": ok_p},
-                )
-
-            phase1_trace.emit(
-                trace_id=trace.trace_id,
-                source="interaction_model",
-                type="prompt.injection.applied",
-                level="info",
-                payload={"target": "interaction_model", "config_path": config_path, "config_hash": config_hash},
-                redactions=["prompt_content"],
-            )
-            ok_i, st_i, _ = _phase1_infer(
-                clients=clients,
-                event_id=trace.trace_id,
-                trace_id=trace.trace_id,
-                person_id=person_id,
-                session_id=sid,
-                target="interaction_model",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Respond to the user (internal smoke): {text}"},
-                ],
-            )
-            if not ok_i or st_i >= 400:
-                phase1_trace.emit(
-                    trace_id=trace.trace_id,
-                    source="interaction_model",
-                    type="error",
-                    level="warn",
-                    payload={"stage": "interaction_model.call", "status": st_i, "ok": ok_i},
-                )
-        except Exception as exc:
-            phase1_trace.emit(
-                trace_id=trace.trace_id,
-                source="interaction_model",
-                type="error",
-                level="warn",
-                payload={"error": str(exc), "stage": "phase1.prompt_injection.verify"},
-            )
+    if phase1_trace:
+        inj = compile_injected_system_prompt(person_id=person_id, session_id=sid, intent="phase1.interaction.pipeline")
+        phase1_trace.emit(
+            trace_id=trace.trace_id,
+            source="planner_model",
+            type="prompt.injection.applied",
+            level="info",
+            payload={"target": "planner_model", "config_path": inj.config_path, "config_hash": inj.config_hash},
+            redactions=["prompt_content"],
+        )
+        phase1_trace.emit(
+            trace_id=trace.trace_id,
+            source="interaction_model",
+            type="prompt.injection.applied",
+            level="info",
+            payload={"target": "interaction_model", "config_path": inj.config_path, "config_hash": inj.config_hash},
+            redactions=["prompt_content"],
+        )
 
     with trace.span("router_started"):
         router_out = router.run(input_event, trace)

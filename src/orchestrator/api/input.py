@@ -50,6 +50,12 @@ def register_input_routes(app) -> None:
                 if adapter is not None:
                     try:
                         evt = TranscriptEvent(**speechio_payload)
+                        # Preserve identity/session for the voice loop (streaming SpeechIO ingress).
+                        if isinstance(evt.attrs, dict):
+                            if isinstance(input_event.person_id, str) and input_event.person_id:
+                                evt.attrs.setdefault("person_id", input_event.person_id)
+                            if isinstance(input_event.session_id, str) and input_event.session_id:
+                                evt.attrs.setdefault("session_id", input_event.session_id)
                         adapter.ingest(evt)
                         return {"ok": True, "trace_id": input_event.trace_id, "streaming": True}
                     except Exception:
@@ -58,6 +64,13 @@ def register_input_routes(app) -> None:
         clients = getattr(app.state, "service_clients", None)
         trace_dir = str(os.getenv("UNISON_TRACE_DIR", "traces"))
         renderer_url = os.getenv("UNISON_RENDERER_URL") or os.getenv("UNISON_EXPERIENCE_RENDERER_URL")
+        if not renderer_url:
+            host = os.getenv("UNISON_EXPERIENCE_RENDERER_HOST") or os.getenv("EXPERIENCE_RENDERER_HOST")
+            port = os.getenv("UNISON_EXPERIENCE_RENDERER_PORT") or os.getenv("EXPERIENCE_RENDERER_PORT")
+            if host and port:
+                renderer_url = f"http://{host}:{port}"
+        if not renderer_url:
+            renderer_url = os.getenv("EXPERIENCE_RENDERER_URL") or os.getenv("RENDERER_URL")
         use_phase1 = os.getenv("UNISON_PHASE1_PIPELINE", "false").lower() in {"1", "true", "yes", "on"}
         if use_phase1:
             result = run_phase1_input_event(

@@ -19,6 +19,7 @@ from .context_client import (
     dashboard_put,
 )
 from unison_common.prompt.engine import PromptEngine
+from unison_common.prompt import compile_injected_system_prompt
 from unison_common.prompt.updates import PromptUpdateProposal
 
 logger = logging.getLogger(__name__)
@@ -322,18 +323,12 @@ class CompanionSessionManager:
         }
 
     def _get_system_prompt(self, person_id: str, session_id: str, envelope: Dict[str, Any]) -> str:
-        engine = self._prompt_engines.get(person_id)
-        if engine is None:
-            engine = PromptEngine.for_person(person_id=person_id)
-            self._prompt_engines[person_id] = engine
-        session_context = {
-            "intent": envelope.get("intent") or "companion.turn",
-            "session_id": session_id,
-            "person_id": person_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        }
-        compiled = engine.compile(session_context=session_context)
-        return compiled.markdown
+        inj = compile_injected_system_prompt(
+            person_id=person_id,
+            session_id=session_id,
+            intent=str(envelope.get("intent") or "companion.turn"),
+        )
+        return inj.system_prompt
 
     def _remember_turn(
         self,

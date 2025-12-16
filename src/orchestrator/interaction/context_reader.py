@@ -15,6 +15,10 @@ def _now_unix_ms() -> int:
 _CACHE: dict[str, ContextSnapshot] = {}
 
 
+def invalidate_context_cache(person_id: str) -> None:
+    _CACHE.pop(person_id, None)
+
+
 @dataclass(frozen=True)
 class ContextReader:
     """
