@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
 from .config import ServiceEndpoints
@@ -23,9 +23,10 @@ class ServiceHttpClient:
     host: str
     port: str
     timeout_seconds: float = 2.0
+    default_headers: Dict[str, str] = field(default_factory=dict)
 
     def get(self, path: str, *, headers: Optional[Dict[str, str]] = None) -> HttpResult:
-        merged_headers = dict(headers or {})
+        merged_headers = {**self.default_headers, **dict(headers or {})}
         baton = get_current_baton()
         if baton:
             merged_headers.setdefault("X-Context-Baton", baton)
@@ -44,7 +45,7 @@ class ServiceHttpClient:
         *,
         headers: Optional[Dict[str, str]] = None,
     ) -> HttpResult:
-        merged_headers = dict(headers or {})
+        merged_headers = {**self.default_headers, **dict(headers or {})}
         baton = get_current_baton()
         if baton:
             merged_headers.setdefault("X-Context-Baton", baton)
@@ -64,7 +65,7 @@ class ServiceHttpClient:
         *,
         headers: Optional[Dict[str, str]] = None,
     ) -> HttpResult:
-        merged_headers = dict(headers or {})
+        merged_headers = {**self.default_headers, **dict(headers or {})}
         baton = get_current_baton()
         if baton:
             merged_headers.setdefault("X-Context-Baton", baton)
@@ -84,6 +85,7 @@ class ServiceClients:
     storage: ServiceHttpClient
     policy: ServiceHttpClient
     inference: ServiceHttpClient
+    capability: ServiceHttpClient | None = None
     comms: ServiceHttpClient | None = None
     actuation: ServiceHttpClient | None = None
     consent: ServiceHttpClient | None = None
@@ -100,6 +102,13 @@ class ServiceClients:
         comms_client = None
         if endpoints.comms_host and endpoints.comms_port:
             comms_client = ServiceHttpClient(endpoints.comms_host, endpoints.comms_port)
+        capability_client = None
+        if endpoints.capability_host and endpoints.capability_port:
+            token = os.getenv("UNISON_CAPABILITY_BEARER_TOKEN") or os.getenv("UNISON_CAPABILITY_TOKEN")
+            headers: Dict[str, str] = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            capability_client = ServiceHttpClient(endpoints.capability_host, endpoints.capability_port, default_headers=headers)
         actuation_client = None
         if endpoints.actuation_host and endpoints.actuation_port:
             actuation_client = ServiceHttpClient(endpoints.actuation_host, endpoints.actuation_port)
@@ -111,6 +120,7 @@ class ServiceClients:
             storage=ServiceHttpClient(endpoints.storage_host, endpoints.storage_port),
             policy=ServiceHttpClient(endpoints.policy_host, endpoints.policy_port),
             inference=ServiceHttpClient(endpoints.inference_host, endpoints.inference_port, timeout_seconds=inference_timeout),
+            capability=capability_client,
             comms=comms_client,
             actuation=actuation_client,
             consent=consent_client,

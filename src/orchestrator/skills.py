@@ -529,10 +529,27 @@ def build_skill_state(
             return {"ok": True, "action_id": action_id, "actuation_result": body}
         return {"ok": False, "error": f"actuation error {status}", "body": body}
 
-    def _ensure_comms_client() -> ServiceHttpClient:
-        if not service_clients.comms:
-            raise RuntimeError("comms client not configured")
-        return service_clients.comms
+    def _ensure_capability_client() -> ServiceHttpClient:
+        if not service_clients.capability:
+            raise RuntimeError("capability resolver client not configured")
+        return service_clients.capability
+
+    def _capability_resolve_and_run(intent: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Planner-contract compliant comms execution:
+        resolve -> run (no direct calls to downstream comms service).
+        """
+        cap = _ensure_capability_client()
+        ok, status, body = cap.post("/capability/resolve", {"step": {"intent": intent, "constraints": {}}})
+        if not ok or not isinstance(body, dict) or not isinstance(body.get("candidate"), dict):
+            raise RuntimeError(f"capability resolve failed: {status}")
+        manifest = body["candidate"].get("manifest") if isinstance(body["candidate"].get("manifest"), dict) else {}
+        capability_id = manifest.get("id") or intent
+        ok, status, run_body = cap.post("/capability/run", {"capability_id": capability_id, "args": args})
+        if not ok or not isinstance(run_body, dict):
+            raise RuntimeError(f"capability run failed: {status}")
+        result = run_body.get("result")
+        return result if isinstance(result, dict) else {"result": result}
 
     def _ensure_actuation_client() -> ServiceHttpClient:
         if not service_clients.actuation:
@@ -623,13 +640,19 @@ def build_skill_state(
         channel = payload.get("channel") or "email"
         if not isinstance(person_id, str) or not person_id:
             return {"ok": False, "error": "missing person_id"}
-        comms_client = _ensure_comms_client()
-        ok, status, body = comms_client.post("/comms/check", {"person_id": person_id, "channel": channel})
-        if not ok or not isinstance(body, dict):
-            return {"ok": False, "error": f"comms error {status}"}
-        cards = body.get("cards")
+        try:
+            body = _capability_resolve_and_run("comms.check", {"person_id": person_id, "channel": channel})
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        cards = body.get("cards") if isinstance(body, dict) else None
         _log_comms_context(person_id, "comms.check", cards, {"channel": channel})
-        return {"ok": True, "person_id": person_id, "channel": channel, "messages": body.get("messages"), "cards": cards}
+        return {
+            "ok": True,
+            "person_id": person_id,
+            "channel": channel,
+            "messages": body.get("messages") if isinstance(body, dict) else None,
+            "cards": cards,
+        }
 
     def handler_comms_summarize(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
@@ -637,13 +660,13 @@ def build_skill_state(
         window = payload.get("window") or "today"
         if not isinstance(person_id, str) or not person_id:
             return {"ok": False, "error": "missing person_id"}
-        comms_client = _ensure_comms_client()
-        ok, status, body = comms_client.post("/comms/summarize", {"person_id": person_id, "window": window})
-        if not ok or not isinstance(body, dict):
-            return {"ok": False, "error": f"comms error {status}"}
-        cards = body.get("cards")
+        try:
+            body = _capability_resolve_and_run("comms.summarize", {"person_id": person_id, "window": window})
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        cards = body.get("cards") if isinstance(body, dict) else None
         _log_comms_context(person_id, "comms.summarize", cards, {"window": window})
-        return {"ok": True, "person_id": person_id, "summary": body.get("summary"), "cards": cards}
+        return {"ok": True, "person_id": person_id, "summary": body.get("summary") if isinstance(body, dict) else None, "cards": cards}
 
     def handler_comms_reply(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
@@ -657,13 +680,13 @@ def build_skill_state(
             return {"ok": False, "error": "missing thread_id"}
         if not isinstance(message_id, str) or not message_id:
             return {"ok": False, "error": "missing message_id"}
-        comms_client = _ensure_comms_client()
-        ok, status, body = comms_client.post(
-            "/comms/reply",
-            {"person_id": person_id, "thread_id": thread_id, "message_id": message_id, "body": body_text},
-        )
-        if not ok or not isinstance(body, dict):
-            return {"ok": False, "error": f"comms error {status}"}
+        try:
+            body = _capability_resolve_and_run(
+                "comms.reply",
+                {"person_id": person_id, "thread_id": thread_id, "message_id": message_id, "body": body_text},
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
         _log_comms_context(person_id, "comms.reply", [], {"thread_id": thread_id, "message_id": message_id})
         return {"ok": True, "person_id": person_id, "thread_id": thread_id, "message_id": message_id, "response": body}
 
@@ -680,13 +703,13 @@ def build_skill_state(
             return {"ok": False, "error": "recipients required"}
         if not subject:
             return {"ok": False, "error": "subject required"}
-        comms_client = _ensure_comms_client()
-        ok, status, body = comms_client.post(
-            "/comms/compose",
-            {"person_id": person_id, "channel": channel, "recipients": recipients, "subject": subject, "body": body_text},
-        )
-        if not ok or not isinstance(body, dict):
-            return {"ok": False, "error": f"comms error {status}"}
+        try:
+            body = _capability_resolve_and_run(
+                "comms.compose",
+                {"person_id": person_id, "channel": channel, "recipients": recipients, "subject": subject, "body": body_text},
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
         tags = body.get("tags") if isinstance(body, dict) else None
         _log_comms_context(person_id, "comms.compose", [], {"channel": channel, "tags": tags, "recipients": recipients})
         return {"ok": True, "person_id": person_id, "channel": channel, "response": body}
@@ -695,10 +718,10 @@ def build_skill_state(
         payload = envelope.get("payload", {}) or {}
         person_id = payload.get("person_id") or "local-user"
         meeting_id = payload.get("meeting_id") or "meeting-1"
-        comms_client = _ensure_comms_client()
-        ok, status, body = comms_client.post("/comms/join_meeting", {"person_id": person_id, "meeting_id": meeting_id})
-        if not ok or not isinstance(body, dict):
-            return {"ok": False, "error": f"comms error {status}"}
+        try:
+            body = _capability_resolve_and_run("comms.join_meeting", {"person_id": person_id, "meeting_id": meeting_id})
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
         cards = body.get("cards")
         _log_comms_context(person_id, "comms.join_meeting", cards, {"meeting_id": meeting_id})
         return {"ok": True, "person_id": person_id, "cards": cards}
@@ -707,10 +730,10 @@ def build_skill_state(
         payload = envelope.get("payload", {}) or {}
         person_id = payload.get("person_id") or "local-user"
         meeting_id = payload.get("meeting_id") or "meeting-1"
-        comms_client = _ensure_comms_client()
-        ok, status, body = comms_client.post("/comms/prepare_meeting", {"person_id": person_id, "meeting_id": meeting_id})
-        if not ok or not isinstance(body, dict):
-            return {"ok": False, "error": f"comms error {status}"}
+        try:
+            body = _capability_resolve_and_run("comms.prepare_meeting", {"person_id": person_id, "meeting_id": meeting_id})
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
         cards = body.get("cards")
         _log_comms_context(person_id, "comms.prepare_meeting", cards, {"meeting_id": meeting_id})
         return {"ok": True, "person_id": person_id, "cards": cards}
@@ -719,10 +742,10 @@ def build_skill_state(
         payload = envelope.get("payload", {}) or {}
         person_id = payload.get("person_id") or "local-user"
         meeting_id = payload.get("meeting_id") or "meeting-1"
-        comms_client = _ensure_comms_client()
-        ok, status, body = comms_client.post("/comms/debrief_meeting", {"person_id": person_id, "meeting_id": meeting_id})
-        if not ok or not isinstance(body, dict):
-            return {"ok": False, "error": f"comms error {status}"}
+        try:
+            body = _capability_resolve_and_run("comms.debrief_meeting", {"person_id": person_id, "meeting_id": meeting_id})
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
         cards = body.get("cards")
         _log_comms_context(person_id, "comms.debrief_meeting", cards, {"meeting_id": meeting_id})
         return {"ok": True, "person_id": person_id, "cards": cards}
@@ -741,16 +764,15 @@ def build_skill_state(
         existing_dashboard = dashboard_get(service_clients, person_id)
         existing_cards = existing_dashboard.get("cards") or []
         cards = payload.get("cards")
-        # Pull comms cards from comms service (best effort)
+        # Pull comms cards via capability resolver (best effort; planner-contract compliant)
         comms_cards: List[Dict[str, Any]] = []
-        if service_clients.comms:
+        if service_clients.capability:
             for channel in ("email", "unison"):
                 try:
-                    ok, status, body = service_clients.comms.post(
-                        "/comms/check", {"person_id": person_id, "channel": channel}
-                    )
-                    if ok and isinstance(body, dict) and isinstance(body.get("cards"), list):
-                        comms_cards.extend([c for c in body.get("cards") if isinstance(c, dict)])
+                    result = _capability_resolve_and_run("comms.check", {"person_id": person_id, "channel": channel})
+                    cards_out = result.get("cards") if isinstance(result, dict) else None
+                    if isinstance(cards_out, list):
+                        comms_cards.extend([c for c in cards_out if isinstance(c, dict)])
                 except Exception:
                     continue
         if not cards:

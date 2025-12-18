@@ -21,6 +21,8 @@ class ServiceEndpoints:
     policy_port: str = "8083"
     inference_host: str = "inference"
     inference_port: str = "8087"
+    capability_host: str = "capability"
+    capability_port: str = "8102"
     comms_host: str = "comms"
     comms_port: str = "8080"
     actuation_host: str | None = None
@@ -57,6 +59,8 @@ class OrchestratorSettings:
             policy_port=os.getenv("UNISON_POLICY_PORT", "8083"),
             inference_host=os.getenv("UNISON_INFERENCE_HOST", "inference"),
             inference_port=os.getenv("UNISON_INFERENCE_PORT", "8087"),
+            capability_host=os.getenv("UNISON_CAPABILITY_HOST", "capability"),
+            capability_port=os.getenv("UNISON_CAPABILITY_PORT", "8102"),
             comms_host=os.getenv("UNISON_COMMS_HOST", "comms"),
             comms_port=os.getenv("UNISON_COMMS_PORT", "8080"),
             actuation_host=os.getenv("UNISON_ACTUATION_HOST") or None,
