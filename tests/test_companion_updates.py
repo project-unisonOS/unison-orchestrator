@@ -26,7 +26,7 @@ def _clients():
     )
 
 
-def test_updates_get_policy_uses_get(monkeypatch):
+def test_updates_get_policy_uses_post(monkeypatch):
     requests = []
 
     class FakeClient:
@@ -41,6 +41,10 @@ def test_updates_get_policy_uses_get(monkeypatch):
 
         def get(self, url, headers=None):
             requests.append(("get", url, None))
+            return _DummyResponse(200, {"capabilities": []})
+
+        def post(self, url, json=None):
+            requests.append(("post", url, json))
             return _DummyResponse(200, {"ok": True, "policy": {"auto_apply": "manual"}})
 
     monkeypatch.setattr("httpx.Client", FakeClient)
@@ -50,10 +54,14 @@ def test_updates_get_policy_uses_get(monkeypatch):
     result = manager._execute_single_tool("updates.get_policy", {}, "person-1", "event-1")
 
     assert result["ok"] is True
-    assert requests[-1] == ("get", "http://updates.example:8089/v1/tools/updates.get_policy", None)
+    assert requests[-1] == (
+        "post",
+        "http://updates.example:8089/v1/tools/updates.get_policy",
+        {"arguments": {"person_id": "person-1"}},
+    )
 
 
-def test_updates_set_policy_uses_patch_and_person_id(monkeypatch):
+def test_updates_set_policy_uses_post_and_person_id(monkeypatch):
     requests = []
 
     class FakeClient:
@@ -69,8 +77,8 @@ def test_updates_set_policy_uses_patch_and_person_id(monkeypatch):
         def get(self, url, headers=None):
             return _DummyResponse(200, {"capabilities": []})
 
-        def patch(self, url, json=None):
-            requests.append(("patch", url, json))
+        def post(self, url, json=None):
+            requests.append(("post", url, json))
             return _DummyResponse(200, {"ok": True})
 
     monkeypatch.setattr("httpx.Client", FakeClient)
@@ -82,7 +90,7 @@ def test_updates_set_policy_uses_patch_and_person_id(monkeypatch):
     assert result["ok"] is True
     assert requests == [
         (
-            "patch",
+            "post",
             "http://updates.example:8089/v1/tools/updates.set_policy",
             {"arguments": {"policy_patch": {"auto_apply": "security_only"}, "person_id": "person-1"}},
         )
