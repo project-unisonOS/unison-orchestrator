@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 
 from orchestrator.clients import ServiceClients
+from orchestrator.context_client import fetch_core_health
 from orchestrator.interaction.input_runner import RendererEmitter
 from unison_common import TraceRecorder
 from unison_common.multimodal import CapabilityClient
@@ -56,6 +57,12 @@ class PowerOnResult:
     trace: TraceRecorder
     renderer_url: Optional[str]
     renderer_ready: bool
+    core_ready: bool
+    auth_ready: bool
+    bootstrap_required: bool
+    onboarding_required: bool
+    stage: str
+    checks: Dict[str, Dict[str, Any]]
     speech_ready: bool
     speech_reason: Optional[str]
     manifest: Dict[str, Any]
@@ -84,11 +91,14 @@ class PowerOnController:
 
         emit("BOOT_START", {"stage": "BOOT_START"})
 
+        checks: Dict[str, Dict[str, Any]] = {}
+
         manifest = {}
         manifest_client = CapabilityClient.from_env()
         with trace.span("poweron.manifest_load"):
             manifest = manifest_client.refresh() or {}
         trace.emit_event("poweron.manifest_loaded", {"ts_unix_ms": _now_unix_ms(), "ok": bool(manifest)})
+        checks["manifest"] = {"ready": bool(manifest), "status": 200 if manifest else 503}
 
         renderer_assets = (manifest.get("renderer") or {}).get("assets") if isinstance(manifest.get("renderer"), dict) else None
         logo = renderer_assets.get("logo") if isinstance(renderer_assets, dict) else None
@@ -127,7 +137,13 @@ class PowerOnController:
         if renderer_url:
             renderer_ready = await self._wait_renderer_ready(renderer_url, trace=trace)
         trace.emit_event("poweron.renderer_ready", {"ts_unix_ms": _now_unix_ms(), "ready": renderer_ready})
+        checks["renderer"] = {"ready": renderer_ready, "status": 200 if renderer_ready else 503, "url": renderer_url}
         emit("RENDERER_READY", {"stage": "RENDERER_READY", "ready": renderer_ready, "ts_unix_ms": _now_unix_ms()})
+
+        core_ready, core_checks = self._core_service_checks()
+        checks.update(core_checks)
+        trace.emit_event("poweron.core_services_checked", {"ts_unix_ms": _now_unix_ms(), "ready": core_ready, "checks": core_checks})
+        emit("CORE_SERVICES_READY" if core_ready else "CORE_SERVICES_DEGRADED", {"stage": "CORE_SERVICES", "ready": core_ready, "checks": core_checks, "ts_unix_ms": _now_unix_ms()})
 
         speech_ready = False
         speech_reason: Optional[str] = None
@@ -142,8 +158,42 @@ class PowerOnController:
                 "SPEECH_UNAVAILABLE",
                 {"stage": "SPEECH_UNAVAILABLE", "reason": speech_reason or "unavailable", "ts_unix_ms": _now_unix_ms()},
             )
+        checks["speech"] = {"ready": speech_ready, "status": 200 if speech_ready else 503, "reason": speech_reason}
 
-        # Enter "ready/listening" mode via renderer instruction (actual capture wiring is done later).
+        auth_ready, bootstrap_required, auth_check = await self._auth_bootstrap_check(trace=trace)
+        checks["auth"] = auth_check
+        trace.emit_event(
+            "poweron.auth_checked",
+            {
+                "ts_unix_ms": _now_unix_ms(),
+                "ready": auth_ready,
+                "bootstrap_required": bootstrap_required,
+                "check": auth_check,
+            },
+        )
+        if bootstrap_required:
+            emit(
+                "AUTH_BOOTSTRAP_REQUIRED",
+                {
+                    "stage": "AUTH_BOOTSTRAP_REQUIRED",
+                    "ready": False,
+                    "bootstrap_required": True,
+                    "ts_unix_ms": _now_unix_ms(),
+                },
+            )
+
+        onboarding_required = bootstrap_required or not renderer_ready or not core_ready or (speech_enabled and not speech_ready)
+        final_stage = "READY_LISTENING"
+        if bootstrap_required:
+            final_stage = "AUTH_BOOTSTRAP_REQUIRED"
+        elif not core_ready:
+            final_stage = "CORE_SERVICES_DEGRADED"
+        elif speech_enabled and not speech_ready:
+            final_stage = "SPEECH_UNAVAILABLE"
+        elif not renderer_ready:
+            final_stage = "RENDERER_UNAVAILABLE"
+
+        # Enter ready/listening only when the system actually cleared startup gates.
         default_asr_profile = None
         default_tts_profile = None
         endpointing = None
@@ -152,14 +202,17 @@ class PowerOnController:
             default_tts_profile = speech_cfg.get("default_tts_profile")
             endpointing = speech_cfg.get("endpointing")
         emit(
-            "READY_LISTENING",
+            final_stage,
             {
-                "stage": "READY_LISTENING",
+                "stage": final_stage,
+                "ready": not onboarding_required,
+                "bootstrap_required": bootstrap_required,
                 "speech_enabled": speech_enabled,
                 "speech_ws_endpoint": speech_ws,
                 "asr_profile": default_asr_profile,
                 "tts_profile": default_tts_profile,
                 "endpointing": endpointing,
+                "checks": checks,
                 "ts_unix_ms": _now_unix_ms(),
             },
         )
@@ -169,6 +222,12 @@ class PowerOnController:
             trace=trace,
             renderer_url=renderer_url,
             renderer_ready=renderer_ready,
+            core_ready=core_ready,
+            auth_ready=auth_ready,
+            bootstrap_required=bootstrap_required,
+            onboarding_required=onboarding_required,
+            stage=final_stage,
+            checks=checks,
             speech_ready=speech_ready,
             speech_reason=speech_reason,
             manifest=manifest,
@@ -191,6 +250,63 @@ class PowerOnController:
                 await asyncio.sleep(0.25)
         trace.emit_event("poweron.renderer_ready_timeout", {"timeout_s": timeout_s})
         return False
+
+    def _core_service_checks(self) -> Tuple[bool, Dict[str, Dict[str, Any]]]:
+        checks: Dict[str, Dict[str, Any]] = {}
+        overall_ready = True
+
+        try:
+            health = fetch_core_health(self._clients)
+        except Exception as exc:
+            return False, {"core": {"ready": False, "status": 503, "error": str(exc)}}
+
+        for name, result in health.items():
+            ok, status, body = result
+            service_ready = bool(ok and status == 200)
+            checks[name] = {
+                "ready": service_ready,
+                "status": status,
+                "body": body if isinstance(body, dict) else None,
+            }
+            if not service_ready:
+                overall_ready = False
+        return overall_ready, checks
+
+    async def _auth_bootstrap_check(
+        self, *, trace: TraceRecorder
+    ) -> Tuple[bool, bool, Dict[str, Any]]:
+        auth_base = os.getenv("UNISON_AUTH_URL")
+        if not auth_base:
+            host = os.getenv("UNISON_AUTH_HOST")
+            port = os.getenv("UNISON_AUTH_PORT")
+            if host and port:
+                auth_base = f"http://{host}:{port}"
+        if not auth_base:
+            auth_base = "http://auth:8083"
+
+        url = f"{auth_base.rstrip('/')}/bootstrap/status"
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                resp = await client.get(url)
+            if resp.status_code != 200:
+                return False, False, {"ready": False, "status": resp.status_code, "url": url}
+            body = resp.json() or {}
+            bootstrap_required = bool(body.get("bootstrap_required"))
+            return (
+                not bootstrap_required,
+                bootstrap_required,
+                {
+                    "ready": not bootstrap_required,
+                    "status": 200,
+                    "bootstrap_required": bootstrap_required,
+                    "enabled": bool(body.get("enabled")),
+                    "admin_exists": bool(body.get("admin_exists")),
+                    "url": url,
+                },
+            )
+        except Exception as exc:
+            trace.emit_event("poweron.auth_check_error", {"error": str(exc), "url": url})
+            return False, False, {"ready": False, "status": 503, "error": str(exc), "url": url}
 
     async def _check_speech_ready(self, speech_http_url: Optional[str], *, trace: TraceRecorder) -> Tuple[bool, Optional[str]]:
         if not speech_http_url:

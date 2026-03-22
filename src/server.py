@@ -60,6 +60,9 @@ instrument_fastapi(app)
 
 logger = configure_logging("unison-orchestrator")
 settings = OrchestratorSettings.from_env()
+app.state.poweron = None
+app.state.poweron_error = None
+app.state.poweron_task = None
 # Allow FastAPI's TestClient default host to pass TrustedHostMiddleware checks
 if "testserver" not in settings.allowed_hosts:
     settings.allowed_hosts.append("testserver")
@@ -255,12 +258,17 @@ async def _power_on_startup() -> None:
             try:
                 result = await controller.run()
                 app.state.poweron = result
+                app.state.poweron_error = None
                 # Start the dev voice loop when speech is available.
                 try:
                     from orchestrator.power_on.voice_loop import VoiceIntentLoop, VoiceLoopConfig
 
                     allow_headless_voice = os.getenv("UNISON_HEADLESS_VOICE_LOOP", "false").lower() in {"1", "true", "yes", "on"}
-                    if getattr(result, "speech_ready", False) and (getattr(result, "renderer_url", None) or allow_headless_voice):
+                    if (
+                        not getattr(result, "onboarding_required", True)
+                        and getattr(result, "speech_ready", False)
+                        and (getattr(result, "renderer_url", None) or allow_headless_voice)
+                    ):
                         loop = VoiceIntentLoop(
                             VoiceLoopConfig(
                                 trace=result.trace,
@@ -276,6 +284,7 @@ async def _power_on_startup() -> None:
                 except Exception as exc:
                     logger.warning("voice loop failed to start: %s", exc)
             except Exception as exc:
+                app.state.poweron_error = str(exc)
                 logger.warning("power-on controller failed: %s", exc)
 
         app.state.poweron_task = asyncio.create_task(_runner())

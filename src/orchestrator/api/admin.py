@@ -194,4 +194,39 @@ def register_admin_routes(
         )
         return resp
 
+    @router_api.get("/startup/status")
+    def startup_status():
+        metrics["/startup/status"] += 1
+        poweron = getattr(app.state, "poweron", None)
+        poweron_error = getattr(app.state, "poweron_error", None)
+        task = getattr(app.state, "poweron_task", None)
+
+        if poweron is None:
+            return {
+                "ok": poweron_error is None,
+                "state": "starting" if poweron_error is None and task is not None else "unavailable",
+                "error": poweron_error,
+            }
+
+        checks = getattr(poweron, "checks", {}) or {}
+        manifest = getattr(poweron, "manifest", {}) or {}
+        speech = manifest.get("io", {}).get("speech", {}) if isinstance(manifest.get("io"), dict) else {}
+        return {
+            "ok": not getattr(poweron, "onboarding_required", True),
+            "state": getattr(poweron, "stage", "unknown"),
+            "onboarding_required": bool(getattr(poweron, "onboarding_required", True)),
+            "bootstrap_required": bool(getattr(poweron, "bootstrap_required", False)),
+            "renderer_ready": bool(getattr(poweron, "renderer_ready", False)),
+            "core_ready": bool(getattr(poweron, "core_ready", False)),
+            "auth_ready": bool(getattr(poweron, "auth_ready", False)),
+            "speech_ready": bool(getattr(poweron, "speech_ready", False)),
+            "speech_reason": getattr(poweron, "speech_reason", None),
+            "speech_ws_endpoint": speech.get("ws_endpoint") if isinstance(speech, dict) else None,
+            "speech_endpointing": speech.get("endpointing") if isinstance(speech, dict) else None,
+            "speech_asr_profile": speech.get("default_asr_profile") if isinstance(speech, dict) else None,
+            "renderer_url": getattr(poweron, "renderer_url", None),
+            "checks": checks,
+            "trace_id": getattr(poweron, "trace_id", None),
+        }
+
     app.include_router(router_api)
