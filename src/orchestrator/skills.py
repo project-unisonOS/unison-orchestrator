@@ -226,6 +226,89 @@ def build_skill_state(
             "required": ["person_id"],
         },
     )
+
+    # -------------------------
+    # Update Service tool surface
+    # -------------------------
+    tool_registry.register_skill_tool(
+        name="updates.check",
+        description="Check for available updates across OS, UnisonOS, and model planes.",
+        parameters={"type": "object", "properties": {}},
+    )
+    tool_registry.register_skill_tool(
+        name="updates.plan",
+        description="Create an update plan for a selection and constraints (may require approval).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "selection": {"type": "object"},
+                "constraints": {"type": "object"},
+            },
+            "required": ["selection", "constraints"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="updates.apply",
+        description="Apply a previously created update plan.",
+        parameters={
+            "type": "object",
+            "properties": {"plan_id": {"type": "string"}},
+            "required": ["plan_id"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="updates.status",
+        description="Get status for an update job.",
+        parameters={
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+    )
+    for op in ("pause", "resume", "cancel"):
+        tool_registry.register_skill_tool(
+            name=f"updates.{op}",
+            description=f"{op.title()} an update job.",
+            parameters={
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+            },
+        )
+    tool_registry.register_skill_tool(
+        name="updates.rollback",
+        description="Rollback to last-known-good versions (or a specific target).",
+        parameters={
+            "type": "object",
+            "properties": {"target": {}},
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="updates.whats_new",
+        description="Summarize highlights between versions.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "from_version": {"type": "string"},
+                "to_version": {"type": "string"},
+            },
+            "required": ["from_version", "to_version"],
+        },
+    )
+    tool_registry.register_skill_tool(
+        name="updates.get_policy",
+        description="Get update policy.",
+        parameters={"type": "object", "properties": {}},
+    )
+    tool_registry.register_skill_tool(
+        name="updates.set_policy",
+        description="Patch update policy.",
+        parameters={
+            "type": "object",
+            "properties": {"policy_patch": {"type": "object"}},
+            "required": ["policy_patch"],
+        },
+    )
     tool_registry.register_skill_tool(
         name="comms.reply",
         description="Reply to an existing thread/message",
