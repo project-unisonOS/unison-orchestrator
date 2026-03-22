@@ -488,6 +488,24 @@ class CompanionSessionManager:
                 mode=mode,
                 changes=changes,
             )
+        if name.startswith("updates."):
+            base = os.getenv("UNISON_UPDATES_URL", "http://updates:8089").rstrip("/")
+            # Forward tool calls to the Update Service local API.
+            payload = dict(arguments or {})
+            payload.setdefault("person_id", person_id)
+            try:
+                with httpx.Client(timeout=15.0) as client:
+                    if name == "updates.get_policy":
+                        resp = client.get(f"{base}/v1/tools/updates.get_policy")
+                    elif name == "updates.set_policy":
+                        resp = client.patch(f"{base}/v1/tools/updates.set_policy", json={"arguments": payload})
+                    else:
+                        resp = client.post(f"{base}/v1/tools/{name}", json={"arguments": payload})
+                if resp.status_code >= 400:
+                    return {"error": f"update service error ({resp.status_code})", "detail": resp.text[:500]}
+                return resp.json()
+            except Exception as exc:
+                return {"error": f"update service unavailable: {exc}"}
         # MCP execution via discovery URL (best-effort)
         if name in self._registry._tools and self._registry._tools[name].source == "mcp":
             return self._execute_mcp_tool(name, arguments)
