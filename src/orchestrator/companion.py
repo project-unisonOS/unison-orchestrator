@@ -30,6 +30,14 @@ _IO_SPEECH_URL = os.getenv("UNISON_IO_SPEECH_URL")
 _CONTEXT_GRAPH_URL = os.getenv("UNISON_CONTEXT_GRAPH_URL")
 _PHASE1_BOUNDARIES = os.getenv("UNISON_PHASE1_MODE", "false").lower() in {"1", "true", "yes", "on"}
 
+
+def _companion_max_tokens() -> int:
+    raw = os.getenv("UNISON_COMPANION_MAX_TOKENS", "256")
+    try:
+        return max(32, int(raw))
+    except ValueError:
+        return 256
+
 @dataclass
 class ToolDescriptor:
     name: str
@@ -200,6 +208,7 @@ class CompanionSessionManager:
             "session_id": session_id,
             "messages": [system_message] + prior_turns + messages,
             "attachments": attachments,
+            "max_tokens": payload.get("max_tokens", _companion_max_tokens()),
             # Phase 1 boundaries: the interaction model must not originate tool calls.
             "tools": [] if _PHASE1_BOUNDARIES else self._registry.list_llm_tools(),
             "tool_choice": "none" if _PHASE1_BOUNDARIES else payload.get("tool_choice", "auto"),
@@ -235,6 +244,7 @@ class CompanionSessionManager:
                     "person_id": person_id,
                     "session_id": session_id,
                     "messages": followup_messages,
+                    "max_tokens": payload.get("max_tokens", _companion_max_tokens()),
                     "tools": self._registry.list_llm_tools(),
                     "tool_choice": "auto",
                 },
