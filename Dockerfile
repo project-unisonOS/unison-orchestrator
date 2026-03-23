@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl git ca-cer
 COPY ${REPO_PATH}/constraints.txt ./constraints.txt
 COPY ${REPO_PATH}/requirements.txt ./requirements.txt
 COPY --from=common_wheel /tmp/wheels /tmp/wheels
-RUN pip install --no-cache-dir -c ./constraints.txt /tmp/wheels/unison_common-*.whl \
+RUN pip install --no-cache-dir "setuptools<81" \
+    && pip install --no-cache-dir -c ./constraints.txt /tmp/wheels/unison_common-*.whl \
     && pip install --no-cache-dir -c ./constraints.txt -r requirements.txt
 
 COPY ${REPO_PATH}/src ./src

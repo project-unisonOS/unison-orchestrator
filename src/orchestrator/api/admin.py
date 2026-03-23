@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from typing import Any, Dict, MutableMapping
 
+import httpx
 from fastapi import APIRouter, Body, HTTPException
 
 from ..context_client import fetch_core_health
@@ -14,6 +16,54 @@ from ..config import OrchestratorSettings
 from ..clients import ServiceClients
 from ..router import RoutingContext, Router
 from unison_common.logging import log_json
+
+
+def _live_renderer_check(renderer_url: str | None) -> Dict[str, Any]:
+    if not renderer_url:
+        return {"ready": False, "status": 503, "url": renderer_url}
+    try:
+        with httpx.Client(timeout=1.5) as client:
+            resp = client.get(f"{renderer_url.rstrip('/')}/ready")
+        if resp.status_code != 200:
+            return {"ready": False, "status": resp.status_code, "url": renderer_url}
+        body = resp.json() or {}
+        return {
+            "ready": bool(body.get("ready")),
+            "status": 200 if bool(body.get("ready")) else 503,
+            "url": renderer_url,
+        }
+    except Exception as exc:
+        return {"ready": False, "status": 503, "error": str(exc), "url": renderer_url}
+
+
+def _live_auth_check() -> Dict[str, Any]:
+    auth_base = os.getenv("UNISON_AUTH_URL")
+    if not auth_base:
+        host = os.getenv("UNISON_AUTH_HOST")
+        port = os.getenv("UNISON_AUTH_PORT")
+        if host and port:
+            auth_base = f"http://{host}:{port}"
+    if not auth_base:
+        auth_base = "http://auth:8083"
+
+    url = f"{auth_base.rstrip('/')}/bootstrap/status"
+    try:
+        with httpx.Client(timeout=1.5) as client:
+            resp = client.get(url)
+        if resp.status_code != 200:
+            return {"ready": False, "status": resp.status_code, "url": url}
+        body = resp.json() or {}
+        bootstrap_required = bool(body.get("bootstrap_required"))
+        return {
+            "ready": not bootstrap_required,
+            "status": 200,
+            "bootstrap_required": bootstrap_required,
+            "enabled": bool(body.get("enabled")),
+            "admin_exists": bool(body.get("admin_exists")),
+            "url": url,
+        }
+    except Exception as exc:
+        return {"ready": False, "status": 503, "error": str(exc), "url": url}
 
 
 def register_admin_routes(
@@ -211,20 +261,43 @@ def register_admin_routes(
         checks = getattr(poweron, "checks", {}) or {}
         manifest = getattr(poweron, "manifest", {}) or {}
         speech = manifest.get("io", {}).get("speech", {}) if isinstance(manifest.get("io"), dict) else {}
+        renderer_url = getattr(poweron, "renderer_url", None)
+        renderer_check = _live_renderer_check(renderer_url)
+        auth_check = _live_auth_check()
+        checks["renderer"] = renderer_check
+        checks["auth"] = auth_check
+
+        renderer_ready = bool(renderer_check.get("ready"))
+        core_ready = bool(getattr(poweron, "core_ready", False))
+        speech_ready = bool(getattr(poweron, "speech_ready", False))
+        bootstrap_required = bool(auth_check.get("bootstrap_required", False))
+        auth_ready = bool(auth_check.get("ready", False))
+        onboarding_required = bootstrap_required or not renderer_ready or not core_ready or not speech_ready
+
+        stage = "READY_LISTENING"
+        if bootstrap_required:
+            stage = "AUTH_BOOTSTRAP_REQUIRED"
+        elif not core_ready:
+            stage = "CORE_SERVICES_DEGRADED"
+        elif not speech_ready:
+            stage = "SPEECH_UNAVAILABLE"
+        elif not renderer_ready:
+            stage = "RENDERER_UNAVAILABLE"
+
         return {
-            "ok": not getattr(poweron, "onboarding_required", True),
-            "state": getattr(poweron, "stage", "unknown"),
-            "onboarding_required": bool(getattr(poweron, "onboarding_required", True)),
-            "bootstrap_required": bool(getattr(poweron, "bootstrap_required", False)),
-            "renderer_ready": bool(getattr(poweron, "renderer_ready", False)),
-            "core_ready": bool(getattr(poweron, "core_ready", False)),
-            "auth_ready": bool(getattr(poweron, "auth_ready", False)),
-            "speech_ready": bool(getattr(poweron, "speech_ready", False)),
+            "ok": not onboarding_required,
+            "state": stage,
+            "onboarding_required": onboarding_required,
+            "bootstrap_required": bootstrap_required,
+            "renderer_ready": renderer_ready,
+            "core_ready": core_ready,
+            "auth_ready": auth_ready,
+            "speech_ready": speech_ready,
             "speech_reason": getattr(poweron, "speech_reason", None),
             "speech_ws_endpoint": speech.get("ws_endpoint") if isinstance(speech, dict) else None,
             "speech_endpointing": speech.get("endpointing") if isinstance(speech, dict) else None,
             "speech_asr_profile": speech.get("default_asr_profile") if isinstance(speech, dict) else None,
-            "renderer_url": getattr(poweron, "renderer_url", None),
+            "renderer_url": renderer_url,
             "checks": checks,
             "trace_id": getattr(poweron, "trace_id", None),
         }
