@@ -438,14 +438,20 @@ def register_event_routes(
             error_message=None,
         )
 
-        if intent != "echo":
+        if intent not in {"echo", "dashboard.refresh"}:
             raise HTTPException(
-                status_code=400, detail=f"Unsupported intent: {intent}. Only 'echo' is supported in M2."
+                status_code=400,
+                detail=f"Unsupported intent: {intent}. Supported intents: 'echo', 'dashboard.refresh'.",
             )
 
-        message = payload.get("message", "")
-        if not message:
-            raise HTTPException(status_code=400, detail="message is required for echo intent")
+        if intent == "echo":
+            message = payload.get("message", "")
+            if not message:
+                raise HTTPException(status_code=400, detail="message is required for echo intent")
+        else:
+            message = ""
+            if not isinstance(payload.get("person_id"), str) or not str(payload.get("person_id")).strip():
+                raise HTTPException(status_code=400, detail="person_id is required for dashboard.refresh")
 
         store_processing_envelope(
             envelope_data={"intent": intent, "message": message},
@@ -456,15 +462,17 @@ def register_event_routes(
             user_id=None,
         )
 
-        echo_skill = skills.get("echo")
-        if echo_skill is None:
-            raise HTTPException(status_code=500, detail="Echo skill is not registered")
+        skill = skills.get(intent)
+        if skill is None:
+            raise HTTPException(status_code=500, detail=f"Skill is not registered for intent: {intent}")
 
         try:
-            with tracer.start_as_current_span("skill.echo") as skill_span:
-                skill_span.set_attribute("skill.name", "echo")
-                skill_span.set_attribute("skill.message", message)
-                echo_result = echo_skill({"payload": {"message": message}, "source": source})
+            with tracer.start_as_current_span(f"skill.{intent}") as skill_span:
+                skill_span.set_attribute("skill.name", intent)
+                if message:
+                    skill_span.set_attribute("skill.message", message)
+                result_payload = {"message": message} if intent == "echo" else payload
+                skill_result = skill({"intent": intent, "payload": result_payload, "source": source})
                 skill_span.set_attribute("skill.result", "success")
 
             total_duration = (time.time() - start_time) * 1000
@@ -473,7 +481,7 @@ def register_event_routes(
             perf_monitor.record("skill_execution_ms", total_duration)
 
             store_processing_envelope(
-                envelope_data={"intent": intent, "result": echo_result},
+                envelope_data={"intent": intent, "result": skill_result},
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 event_type="skill_complete",
@@ -489,7 +497,9 @@ def register_event_routes(
                 "correlation_id": correlation_id,
                 "result": {
                     "intent": intent,
-                    "response": echo_result.get("echo", {}).get("message", message),
+                    "response": skill_result.get("echo", {}).get("message", message)
+                    if intent == "echo"
+                    else skill_result,
                     "processed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 },
                 "duration_ms": round(total_duration, 2),
