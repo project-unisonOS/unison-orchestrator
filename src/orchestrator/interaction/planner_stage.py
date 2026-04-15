@@ -25,7 +25,21 @@ class PlannerStage:
                 },
             )
         normalized = (text or "").strip()
-        if normalized.lower().startswith("browse ") and "://" in normalized:
+        lowered = normalized.lower()
+        if lowered.startswith("download ") and "://" in normalized:
+            url = normalized.split(" ", 1)[1].strip()
+            action = ActionEnvelope(
+                action_id=str(uuid.uuid4()),
+                kind="vdi",
+                name="vdi.download",
+                args={"url": url},
+                risk_level="medium",
+                policy_context={"scopes": ["vdi.download"]},
+            )
+            plan = Plan(intent=Intent(name="vdi.download", goal="Download a file in a bounded VDI session"), actions=[action])
+            trace.emit_event("planner_output", {"actions": 1, "intent": "vdi.download"})
+            return PlannerOutput(plan=plan, rationale="stub planner: download URL")
+        if lowered.startswith("browse ") and "://" in normalized:
             url = normalized.split(" ", 1)[1].strip()
             action = ActionEnvelope(
                 action_id=str(uuid.uuid4()),
