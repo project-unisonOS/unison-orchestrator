@@ -92,3 +92,37 @@ def test_vdi_download_preserves_file_ids_and_expected_payload():
     assert payload["filename"] == "report.pdf"
     assert payload["target_path"] == "downloads/report.pdf"
     assert payload["headers"] == {"X-Test": "1"}
+
+
+def test_vdi_download_surfaces_bounded_downstream_failure():
+    act = _FakeHttp()
+    act.when_post(
+        "/vdi/tasks/download",
+        {"detail": "domain not allowed", "status": "failed"},
+        status=403,
+        ok=False,
+    )
+    dummy = _FakeHttp()
+    clients = ServiceClients(context=dummy, storage=dummy, policy=dummy, inference=dummy, actuation=act)  # type: ignore[arg-type]
+
+    action = ActionEnvelope(
+        action_id="a3",
+        kind="vdi",
+        name="vdi.download",
+        args={
+            "person_id": "p1",
+            "session_id": "s-denied",
+            "url": "https://blocked.example.com/report.pdf",
+            "filename": "report.pdf",
+        },
+        risk_level="low",
+    )
+    trace = TraceRecorder(service="test")
+    res = VdiExecutor().execute(action=action, clients=clients, trace=trace)
+
+    assert res.ok is False
+    assert res.error == "actuation vdi call failed status=403"
+    assert res.result == {
+        "status": 403,
+        "body": {"detail": "domain not allowed", "status": "failed"},
+    }
