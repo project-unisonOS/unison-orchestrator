@@ -64,3 +64,58 @@ def test_comms_compose_validates_and_calls_service():
     )
     assert result.get("ok") is True
     assert any("/capability/run" in p[0] for p in cap.posts)
+
+
+def test_comms_compose_preserves_gmail_draft_shape():
+    service_clients = _clients_with_comms()
+    cap = service_clients.capability
+    cap.enqueue_post(True, 200, {"candidate": {"manifest": {"id": "comms.compose"}}})
+    cap.enqueue_post(
+        True,
+        200,
+        {
+            "result": {
+                "status": "draft",
+                "channel": "email",
+                "provider": "gmail",
+                "draft": {
+                    "thread_id": "thread-1",
+                    "message_id": "msg-1",
+                    "subject": "Re: Project UnisonOS",
+                    "body": "Here is a draft reply.",
+                    "to": ["a@example.com"],
+                },
+                "cards": [
+                    {
+                        "origin_intent": "comms.compose",
+                        "type": "comms.draft",
+                        "title": "Draft ready",
+                    }
+                ],
+            }
+        },
+    )
+    state = build_skill_state(service_clients)
+    handler = state["handlers"]["comms_compose"]
+    result = handler(
+        {
+            "intent": "comms.compose",
+            "payload": {
+                "person_id": "p1",
+                "channel": "email",
+                "recipients": ["a@example.com"],
+                "subject": "Re: Project UnisonOS",
+                "body": "Please draft a reply",
+            },
+        }
+    )
+
+    assert result.get("ok") is True
+    assert result.get("channel") == "email"
+    response = result.get("response")
+    assert response["status"] == "draft"
+    assert response["provider"] == "gmail"
+    assert response["draft"]["thread_id"] == "thread-1"
+    assert response["draft"]["message_id"] == "msg-1"
+    assert response["draft"]["to"] == ["a@example.com"]
+    assert response["cards"][0]["type"] == "comms.draft"
