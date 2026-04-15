@@ -45,3 +45,50 @@ def test_vdi_executor_calls_actuation_proxy():
     assert method == "POST"
     assert path == "/vdi/tasks/browse"
     assert payload["person_id"] == "p1"
+
+
+def test_vdi_download_preserves_file_ids_and_expected_payload():
+    act = _FakeHttp()
+    act.when_post(
+        "/vdi/tasks/download",
+        {
+            "status": "ok",
+            "file_ids": ["artifact-1"],
+            "artifacts": ["/tmp/report.pdf"],
+            "telemetry": {"download_mode": "http"},
+        },
+        status=200,
+        ok=True,
+    )
+    dummy = _FakeHttp()
+    clients = ServiceClients(context=dummy, storage=dummy, policy=dummy, inference=dummy, actuation=act)  # type: ignore[arg-type]
+
+    action = ActionEnvelope(
+        action_id="a2",
+        kind="vdi",
+        name="vdi.download",
+        args={
+            "person_id": "p1",
+            "session_id": "s-download",
+            "url": "https://example.com/report.pdf",
+            "filename": "report.pdf",
+            "headers": {"X-Test": "1"},
+            "target_path": "downloads/report.pdf",
+        },
+        risk_level="low",
+    )
+    trace = TraceRecorder(service="test")
+    res = VdiExecutor().execute(action=action, clients=clients, trace=trace)
+
+    assert res.ok is True
+    assert res.result["body"]["file_ids"] == ["artifact-1"]
+    assert act.calls
+    method, path, _, payload = act.calls[0]
+    assert method == "POST"
+    assert path == "/vdi/tasks/download"
+    assert payload["person_id"] == "p1"
+    assert payload["session_id"] == "s-download"
+    assert payload["url"] == "https://example.com/report.pdf"
+    assert payload["filename"] == "report.pdf"
+    assert payload["target_path"] == "downloads/report.pdf"
+    assert payload["headers"] == {"X-Test": "1"}
