@@ -258,21 +258,27 @@ def register_admin_routes(
                 "error": poweron_error,
             }
 
-        checks = getattr(poweron, "checks", {}) or {}
+        checks = dict(getattr(poweron, "checks", {}) or {})
         manifest = getattr(poweron, "manifest", {}) or {}
         speech = manifest.get("io", {}).get("speech", {}) if isinstance(manifest.get("io"), dict) else {}
         renderer_url = getattr(poweron, "renderer_url", None)
-        renderer_check = _live_renderer_check(renderer_url)
-        auth_check = _live_auth_check()
-        checks["renderer"] = renderer_check
-        checks["auth"] = auth_check
 
-        renderer_ready = bool(renderer_check.get("ready"))
+        renderer_check = checks.get("renderer") if isinstance(checks.get("renderer"), dict) else None
+        if renderer_check is None:
+            renderer_check = _live_renderer_check(renderer_url)
+            checks["renderer"] = renderer_check
+
+        auth_check = checks.get("auth") if isinstance(checks.get("auth"), dict) else None
+        if auth_check is None:
+            auth_check = _live_auth_check()
+            checks["auth"] = auth_check
+
+        renderer_ready = bool(getattr(poweron, "renderer_ready", renderer_check.get("ready") if isinstance(renderer_check, dict) else False))
         core_ready = bool(getattr(poweron, "core_ready", False))
         speech_ready = bool(getattr(poweron, "speech_ready", False))
-        bootstrap_required = bool(auth_check.get("bootstrap_required", False))
-        auth_ready = bool(auth_check.get("ready", False))
-        onboarding_required = bootstrap_required or not renderer_ready or not core_ready or not speech_ready
+        bootstrap_required = bool(getattr(poweron, "bootstrap_required", auth_check.get("bootstrap_required") if isinstance(auth_check, dict) else False))
+        auth_ready = bool(getattr(poweron, "auth_ready", auth_check.get("ready") if isinstance(auth_check, dict) else False))
+        onboarding_required = bool(getattr(poweron, "onboarding_required", bootstrap_required or not renderer_ready or not core_ready or not speech_ready))
 
         stage = "READY_LISTENING"
         if bootstrap_required:
