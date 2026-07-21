@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unisonos.ai/schemas/phase1/renderer_directives.v1.schema.json",
+  "title": "RendererDirectivesV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verbosity", "visual_density", "presence", "modality"],
+  "properties": {
+    "verbosity": { "type": "string", "enum": ["minimal", "normal", "detailed"] },
+    "visual_density": { "type": "string", "enum": ["sparse", "balanced", "dense"] },
+    "presence": { "type": "string", "enum": ["calm", "neutral", "energetic"] },
+    "modality": { "type": "string", "enum": ["renderer", "voice", "both"] },
+    "pacing_wpm": { "type": "integer", "minimum": 80, "maximum": 240, "default": 160 },
+    "allow_motion": { "type": "boolean", "default": true },
+    "accessibility_hints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefer_audio": { "type": "boolean" },
+        "prefer_large_text": { "type": "boolean" },
+        "reduce_animation": { "type": "boolean" }
+      },
+      "default": {}
+    }
+  }
+}

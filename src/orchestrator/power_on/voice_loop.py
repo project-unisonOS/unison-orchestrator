@@ -42,7 +42,7 @@ class VoiceIntentLoop:
         self._cfg = cfg
         self._speechio = IngressSpeechIOAdapter()
         self._renderer_emitter = RendererEmitter(cfg.renderer_url) if cfg.renderer_url else None
-        self._default_person_id = os.getenv("UNISON_DEFAULT_PERSON_ID", "local-person")
+        self._default_person_id = os.getenv("UNISON_DEFAULT_PERSON_ID", "")
         self._first_partial = False
         self._first_feedback_emitted = False
 

@@ -16,10 +16,10 @@ sys.path[:] = [
 ]
 
 paths = [SERVICE_ROOT, SRC_ROOT]
-if os.path.isdir(TOPLEVEL_COMMON_SRC):
-    paths.append(TOPLEVEL_COMMON_SRC)
-elif os.path.isdir(WORKSPACE_COMMON_SRC):
+if os.path.isdir(WORKSPACE_COMMON_SRC):
     paths.append(WORKSPACE_COMMON_SRC)
+elif os.path.isdir(TOPLEVEL_COMMON_SRC):
+    paths.append(TOPLEVEL_COMMON_SRC)
 
 for path in reversed(paths):
     if path not in sys.path:

@@ -23,7 +23,7 @@ def test_readiness_allowed_true_and_false():
         "/evaluate",
         {
             "capability_id": "test.ACTION",
-            "context": {"actor": "local-user", "intent": "readiness-check"},
+            "context": {"actor": "service:orchestrator-readiness", "intent": "readiness-check"},
         },
         headers={"X-Event-ID": "evt-1"},
     )

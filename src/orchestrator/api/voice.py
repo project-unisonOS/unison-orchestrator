@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ..companion import CompanionSessionManager
 from ..clients import ServiceClients
@@ -21,6 +21,7 @@ def register_voice_routes(
 
     @api.post("/voice/ingest")
     def voice_ingest(
+        request: Request,
         body: Dict[str, Any] = Body(...),
         current_user: Dict[str, Any] = Depends(_auth_dependency),
     ):
@@ -29,7 +30,9 @@ def register_voice_routes(
         transcript = body.get("transcript") or body.get("text")
         if not isinstance(transcript, str) or not transcript.strip():
             raise HTTPException(status_code=400, detail="transcript is required")
-        person_id = body.get("person_id") or "anonymous"
+        person_id = current_user.get("person_id") or body.get("person_id")
+        if not isinstance(person_id, str) or not person_id:
+            raise HTTPException(status_code=403, detail="voice input lacks a bound person principal")
         session_id = body.get("session_id") or str(uuid.uuid4())
         wakeword_command = bool(body.get("wakeword_command"))
         envelope = {

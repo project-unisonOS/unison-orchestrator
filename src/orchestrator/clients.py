@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .config import ServiceEndpoints
 from unison_common.baton import get_current_baton
+from unison_common.principal_middleware import get_current_principal_token
 import os
 from unison_common.http_client import (
     http_get_json_with_retry,
@@ -27,6 +28,9 @@ class ServiceHttpClient:
 
     def get(self, path: str, *, headers: Optional[Dict[str, str]] = None) -> HttpResult:
         merged_headers = {**self.default_headers, **dict(headers or {})}
+        principal_token = get_current_principal_token()
+        if principal_token:
+            merged_headers["Authorization"] = f"Bearer {principal_token}"
         baton = get_current_baton()
         if baton:
             merged_headers.setdefault("X-Context-Baton", baton)
@@ -46,6 +50,9 @@ class ServiceHttpClient:
         headers: Optional[Dict[str, str]] = None,
     ) -> HttpResult:
         merged_headers = {**self.default_headers, **dict(headers or {})}
+        principal_token = get_current_principal_token()
+        if principal_token:
+            merged_headers["Authorization"] = f"Bearer {principal_token}"
         baton = get_current_baton()
         if baton:
             merged_headers.setdefault("X-Context-Baton", baton)
@@ -66,6 +73,9 @@ class ServiceHttpClient:
         headers: Optional[Dict[str, str]] = None,
     ) -> HttpResult:
         merged_headers = {**self.default_headers, **dict(headers or {})}
+        principal_token = get_current_principal_token()
+        if principal_token:
+            merged_headers["Authorization"] = f"Bearer {principal_token}"
         baton = get_current_baton()
         if baton:
             merged_headers.setdefault("X-Context-Baton", baton)
