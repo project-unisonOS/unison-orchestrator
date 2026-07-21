@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unisonos.ai/schemas/phase1/memoryop.v1.schema.json",
+  "title": "MemoryOpV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["op_id", "op", "target", "payload"],
+  "properties": {
+    "op_id": { "type": "string", "minLength": 8 },
+    "op": { "type": "string", "enum": ["query", "upsert", "delete"] },
+    "target": { "type": "string", "enum": ["profile", "preferences", "context_graph"] },
+    "payload": { "type": "object", "additionalProperties": true },
+    "expected_effect": { "type": "string", "enum": ["none", "read", "write"] }
+  }
+}

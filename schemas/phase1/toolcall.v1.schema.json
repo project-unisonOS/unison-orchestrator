@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unisonos.ai/schemas/phase1/toolcall.v1.schema.json",
+  "title": "ToolCallV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool_call_id", "tool_name", "args", "authorization", "timeout_ms"],
+  "properties": {
+    "tool_call_id": { "type": "string", "minLength": 8 },
+    "tool_name": {
+      "type": "string",
+      "enum": ["vdi.use_computer", "system.open_url", "system.search", "context.query", "context.upsert", "noop"]
+    },
+    "args": { "type": "object", "additionalProperties": true },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_decision"],
+      "properties": {
+        "policy_decision": { "type": "string", "enum": ["allow", "deny", "confirm"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 600000 },
+    "idempotency_key": { "type": "string" }
+  }
+}

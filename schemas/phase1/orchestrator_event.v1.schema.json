@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unisonos.ai/schemas/phase1/orchestrator_event.v1.schema.json",
+  "title": "OrchestratorEventV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "ts", "trace_id", "span_id", "source", "type", "level", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 8 },
+    "ts": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": "string", "minLength": 8 },
+    "span_id": { "type": "string", "minLength": 4 },
+    "parent_span_id": { "type": "string" },
+    "source": {
+      "type": "string",
+      "enum": [
+        "boot",
+        "modelpack",
+        "speech.asr",
+        "speech.tts",
+        "interaction_model",
+        "planner_model",
+        "context_store",
+        "renderer",
+        "tool_runtime",
+        "vdi_agent",
+        "policy"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "boot.mode_selected",
+        "boot.ready",
+        "modelpack.required",
+        "modelpack.present",
+        "modelpack.missing",
+        "modelpack.invalid",
+        "modelpack.install.started",
+        "modelpack.install.finished",
+        "modelpack.verify.started",
+        "modelpack.verify.finished",
+        "speech.asr.partial",
+        "speech.asr.final",
+        "speech.tts.start",
+        "speech.tts.stop",
+        "speech.tts.barge_in",
+        "intent.created",
+        "prompt.injection.applied",
+        "planner.plan.created",
+        "planner.tool_call.requested",
+        "tool_call.started",
+        "tool_call.finished",
+        "memory.op.requested",
+        "memory.op.finished",
+        "interaction.response.requested",
+        "interaction.response.generated",
+        "renderer.frame.rendered",
+        "error"
+      ]
+    },
+    "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+    "payload": { "type": "object", "additionalProperties": true },
+    "redactions": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["prompt_content", "audio_raw", "pii", "secrets"] },
+      "default": []
+    }
+  }
+}
