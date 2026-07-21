@@ -30,7 +30,7 @@ def _now_unix_ms() -> int:
 def run_thin_slice(
     *,
     text: str,
-    person_id: str = "local-person",
+    person_id: str,
     session_id: Optional[str] = None,
     renderer_url: Optional[str] = None,
     trace_dir: str = "traces",

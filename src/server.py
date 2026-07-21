@@ -43,6 +43,7 @@ from unison_common.idempotency import IdempotencyConfig, IdempotencyManager, get
 from unison_common.idempotency_middleware import IdempotencyKeyRequiredMiddleware, IdempotencyMiddleware
 from unison_common.logging import configure_logging
 from unison_common.audit_middleware import AuditMiddleware
+from unison_common.principal_middleware import PrincipalBindingMiddleware
 from router import Router, RoutingStrategy
 from collections import defaultdict
 
@@ -102,6 +103,12 @@ logger.info("Context baton middleware enabled (optional validation)")
 
 # Audit logging with header redaction (no client IP in default)
 app.add_middleware(AuditMiddleware, service_name="unison-orchestrator")
+app.add_middleware(
+    PrincipalBindingMiddleware,
+    service_name="orchestrator",
+    public_paths={"/", "/health", "/healthz", "/ready", "/readyz", "/metrics", "/startup/status", "/docs", "/openapi.json"},
+    allow_test_bypass=True,
+)
 
 # Multimodal capabilities
 try:

@@ -31,6 +31,16 @@ def configure_replay_store() -> None:
 def register_replay_routes(app) -> None:
     router = APIRouter(prefix="/replay")
 
+    def owner_id(current_user: Dict[str, Any]) -> str:
+        return str(current_user.get("person_id") or current_user.get("principal_id") or current_user.get("username") or "")
+
+    def require_owned_trace(trace_id: str, current_user: Dict[str, Any]):
+        replay_manager = get_replay_manager()
+        envelopes = replay_manager.store.get_envelopes_by_trace(trace_id)
+        if not envelopes or envelopes[0].user_id != owner_id(current_user):
+            raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
+        return replay_manager, envelopes
+
     @router.get("/traces")
     async def list_traces(
         limit: int = 50,
@@ -47,8 +57,9 @@ def register_replay_routes(app) -> None:
         start_dt = datetime.fromisoformat(start_date) if start_date else None
         end_dt = datetime.fromisoformat(end_date) if end_date else None
 
+        bound_owner = owner_id(current_user)
         filtered_ids, total_count = replay_manager.store.filter_traces(
-            user_id=user_id,
+            user_id=bound_owner,
             start_date=start_dt,
             end_date=end_dt,
             status=status,
@@ -70,7 +81,7 @@ def register_replay_routes(app) -> None:
             "offset": offset,
             "filtered": len(traces),
             "filters": {
-                "user_id": user_id,
+                "user_id": bound_owner,
                 "start_date": start_date,
                 "end_date": end_date,
                 "status": status,
@@ -80,7 +91,7 @@ def register_replay_routes(app) -> None:
 
     @router.get("/{trace_id}/summary")
     async def get_trace_summary(trace_id: str, current_user: Dict[str, Any] = Depends(verify_token)):
-        replay_manager = get_replay_manager()
+        replay_manager, _ = require_owned_trace(trace_id, current_user)
         summary = replay_manager.get_trace_summary(trace_id)
         if not summary.get("found"):
             raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
@@ -92,12 +103,11 @@ def register_replay_routes(app) -> None:
         replay_options: Dict[str, Any] = Body(default={"include_context": True, "time_scale": 1.0}),
         current_user: Dict[str, Any] = Depends(verify_token),
     ):
-        replay_manager = get_replay_manager()
+        replay_manager, envelopes = require_owned_trace(trace_id, current_user)
         summary = replay_manager.get_trace_summary(trace_id)
         if not summary.get("found"):
             raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
 
-        envelopes = replay_manager.store.get_envelopes_by_trace(trace_id)
         events = [env.to_dict() for env in envelopes]
 
         return {
@@ -112,7 +122,7 @@ def register_replay_routes(app) -> None:
 
     @router.delete("/{trace_id}")
     async def delete_trace(trace_id: str, current_user: Dict[str, Any] = Depends(require_roles(["admin"]))):
-        replay_manager = get_replay_manager()
+        replay_manager, _ = require_owned_trace(trace_id, current_user)
         summary = replay_manager.get_trace_summary(trace_id)
         if not summary.get("found"):
             raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
@@ -134,12 +144,10 @@ def register_replay_routes(app) -> None:
         format: str = "json",
         current_user: Dict[str, Any] = Depends(require_roles(["admin", "operator"])),
     ):
-        replay_manager = get_replay_manager()
+        replay_manager, envelopes = require_owned_trace(trace_id, current_user)
         summary = replay_manager.get_trace_summary(trace_id)
         if not summary.get("found"):
             raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
-
-        envelopes = replay_manager.store.get_envelopes_by_trace(trace_id)
 
         if format == "csv":
             output = io.StringIO()
@@ -202,17 +210,9 @@ def register_replay_routes(app) -> None:
     @router.get("/statistics")
     async def replay_statistics(current_user: Dict[str, Any] = Depends(verify_token)):
         replay_manager = get_replay_manager()
-        stats = replay_manager.store.get_statistics()
-
-        user_roles = current_user.get("roles", [])
-        if "admin" in user_roles:
-            user_counts: Dict[str, int] = {}
-            for trace_id in replay_manager.store.get_trace_ids():
-                envelopes = replay_manager.store.get_envelopes_by_trace(trace_id)
-                if envelopes and envelopes[0].user_id:
-                    user_id = envelopes[0].user_id
-                    user_counts[user_id] = user_counts.get(user_id, 0) + 1
-            stats["traces_by_user"] = user_counts
+        owner = owner_id(current_user)
+        owned_ids, owned_count = replay_manager.store.filter_traces(user_id=owner, limit=50000)
+        stats = {"total_traces": owned_count, "total_envelopes": sum(len(replay_manager.store.get_envelopes_by_trace(trace_id)) for trace_id in owned_ids)}
 
         return {"statistics": stats, "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
 

@@ -719,7 +719,7 @@ def build_skill_state(
 
     def handler_comms_check(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         channel = payload.get("channel") or "email"
         if not isinstance(person_id, str) or not person_id:
             return {"ok": False, "error": "missing person_id"}
@@ -739,7 +739,7 @@ def build_skill_state(
 
     def handler_comms_summarize(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         window = payload.get("window") or "today"
         if not isinstance(person_id, str) or not person_id:
             return {"ok": False, "error": "missing person_id"}
@@ -753,7 +753,7 @@ def build_skill_state(
 
     def handler_comms_reply(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         thread_id = payload.get("thread_id")
         message_id = payload.get("message_id")
         body_text = payload.get("body") or ""
@@ -775,7 +775,7 @@ def build_skill_state(
 
     def handler_comms_compose(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         channel = payload.get("channel") or "email"
         recipients = payload.get("recipients") or []
         subject = payload.get("subject") or ""
@@ -799,7 +799,7 @@ def build_skill_state(
 
     def handler_comms_join_meeting(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         meeting_id = payload.get("meeting_id") or "meeting-1"
         try:
             body = _capability_resolve_and_run("comms.join_meeting", {"person_id": person_id, "meeting_id": meeting_id})
@@ -811,7 +811,7 @@ def build_skill_state(
 
     def handler_comms_prepare_meeting(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         meeting_id = payload.get("meeting_id") or "meeting-1"
         try:
             body = _capability_resolve_and_run("comms.prepare_meeting", {"person_id": person_id, "meeting_id": meeting_id})
@@ -823,7 +823,7 @@ def build_skill_state(
 
     def handler_comms_debrief_meeting(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         meeting_id = payload.get("meeting_id") or "meeting-1"
         try:
             body = _capability_resolve_and_run("comms.debrief_meeting", {"person_id": person_id, "meeting_id": meeting_id})
@@ -963,7 +963,7 @@ def build_skill_state(
         key–value store and emits a summary card into the dashboard and renderer.
         """
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         workflow_id = payload.get("workflow_id")
         project_id = payload.get("project_id")
         mode = payload.get("mode") or "design"
@@ -985,7 +985,7 @@ def build_skill_state(
         consult context-graph traces for richer recall.
         """
         payload = envelope.get("payload", {}) or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         query = payload.get("query") or ""
         time_hint_days = payload.get("time_hint_days") or 30
         tags_hint = payload.get("tags_hint")
@@ -1005,7 +1005,7 @@ def build_skill_state(
 
     def handler_caps_report(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload") or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         caps = payload.get("caps") or {}
         if not isinstance(caps, dict):
             return {"ok": False, "error": "invalid-caps"}
@@ -1038,7 +1038,7 @@ def build_skill_state(
 
     def handler_startup_prompt_plan(envelope: Dict[str, Any]) -> Dict[str, Any]:
         payload = envelope.get("payload") or {}
-        person_id = payload.get("person_id") or "local-user"
+        person_id = payload.get("person_id")
         caps_payload = payload.get("caps") if isinstance(payload.get("caps"), dict) else None
         locale_hint = payload.get("locale_hint")
         caps = caps_payload or _load_caps(person_id)

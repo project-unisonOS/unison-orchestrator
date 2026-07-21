@@ -43,7 +43,7 @@ def register_dev_routes(app) -> None:
         clients = getattr(app.state, "service_clients", None)
         result = run_thin_slice(
             text=text,
-            person_id=str(body.get("person_id") or "local-person"),
+            person_id=str(body.get("person_id") or ""),
             session_id=(str(body["session_id"]) if isinstance(body.get("session_id"), str) else None),
             renderer_url=(str(body["renderer_url"]) if isinstance(body.get("renderer_url"), str) else None),
             trace_dir=str(body.get("trace_dir") or "traces"),

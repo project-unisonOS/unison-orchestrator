@@ -39,7 +39,7 @@ def readiness_allowed(clients: ServiceClients, *, event_id: str) -> bool:
     """Verify a synthetic readiness capability via policy."""
     payload = {
         "capability_id": "test.ACTION",
-        "context": {"actor": "local-user", "intent": "readiness-check"},
+        "context": {"actor": "service:orchestrator-readiness", "intent": "readiness-check"},
     }
     ok, _, body = evaluate_capability(clients, payload, event_id=event_id)
     if not ok or not isinstance(body, dict):

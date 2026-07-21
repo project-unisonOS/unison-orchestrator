@@ -90,6 +90,8 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
         consent=Depends(require_consent([ConsentScopes.INGEST_WRITE])) if _require_payments_consent else None,
     ):
         metrics["/payments/instruments"] += 1
+        if current_user.get("person_id"):
+            payload.person_id = current_user["person_id"]
         if payments_client:
             payload_dict = payload.model_dump()
             baton = current_user.get("baton")
@@ -119,6 +121,8 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
         consent=Depends(require_consent([ConsentScopes.INGEST_WRITE])) if _require_payments_consent else None,
     ):
         metrics["/payments/transactions"] += 1
+        if current_user.get("person_id"):
+            payload.person_id = current_user["person_id"]
         if _require_payment_approval and not payload.authorization_context.get("approved"):
             raise HTTPException(status_code=403, detail="payment requires explicit approval")
         policy_payload = {
@@ -164,6 +168,7 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
     @api.get("/payments/transactions/{txn_id}")
     def get_transaction_status(
         txn_id: str,
+        request: Request,
         current_user: Dict[str, Any] = Depends(_auth_dependency),
     ):
         metrics["/payments/transactions"] += 1
@@ -176,6 +181,8 @@ def register_payment_routes(app, *, metrics: Dict[str, int], service_clients) ->
         try:
             txn = service.get_transaction_status(txn_id)
         except KeyError:
+            raise HTTPException(status_code=404, detail="transaction not found")
+        if current_user.get("person_id") and txn.person_id != current_user["person_id"]:
             raise HTTPException(status_code=404, detail="transaction not found")
         return {"ok": True, "transaction": txn.__dict__}
 

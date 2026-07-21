@@ -34,6 +34,7 @@ def test_thin_slice_emits_renderer_event_and_propagates_trace_headers(tmp_path, 
 
     result = thin_slice.run_thin_slice(
         text="hello",
+        person_id="person:test",
         renderer_url="http://renderer.local",
         trace_dir=str(tmp_path),
     )

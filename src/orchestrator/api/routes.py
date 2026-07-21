@@ -31,6 +31,8 @@ from unison_common.auth import verify_token
 from unison_common.consent import ConsentScopes
 from unison_common.logging import log_json
 from unison_common.replay_endpoints import store_processing_envelope
+from unison_common.principal import bind_identity
+from unison_common.principal_middleware import get_bound_principal
 
 
 Skill = Callable[[Dict[str, Any]], Dict[str, Any]]
@@ -109,6 +111,7 @@ def register_event_routes(
 
     @api.post("/event")
     async def handle_event(
+        request: Request,
         envelope: dict = Body(...),
         current_user: Dict[str, Any] = Depends(_auth_dependency),
     ):
@@ -126,6 +129,22 @@ def register_event_routes(
                 roles=current_user.get("roles", []),
             )
             raise HTTPException(status_code=400, detail=str(e))
+
+        try:
+            principal = get_bound_principal(request)
+            envelope = bind_identity(envelope, principal)
+            if isinstance(envelope.get("payload"), dict):
+                envelope["payload"] = bind_identity(envelope["payload"], principal)
+            current_user = {
+                **current_user,
+                "username": principal.login_handle or principal.principal_id,
+                "principal_id": principal.principal_id,
+                "person_id": principal.person_id,
+                "roles": list(principal.roles),
+            }
+        except RuntimeError:
+            # Explicit legacy-test bypass only; production middleware always binds.
+            pass
 
         envelope["user"] = {
             "username": current_user.get("username"),
@@ -432,7 +451,7 @@ def register_event_routes(
             correlation_id=correlation_id,
             event_type="ingest_request",
             source="orchestrator",
-            user_id=current_user.get("username"),
+            user_id=current_user.get("person_id") or current_user.get("principal_id"),
             processing_time_ms=None,
             status_code=200,
             error_message=None,
