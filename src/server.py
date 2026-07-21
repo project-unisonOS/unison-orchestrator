@@ -361,4 +361,5 @@ async def get_performance_metrics_m5(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080) 
+    # Container ingress requires all-interface binding; network policy is enforced externally.
+    uvicorn.run(app, host="0.0.0.0", port=8080)  # nosec B104
