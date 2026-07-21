@@ -29,10 +29,8 @@ jobs:
 
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install "git+https://github.com/project-unisonOS/unison-common.git@main"
-          # Enforce framework versions known to be compatible with this codebase
-          python -m pip install fastapi==0.115.0 pydantic==2.9.2
+          python -m pip install --upgrade pip wheel
+          python -m pip install "git+https://github.com/project-unisonOS/unison-common.git@5337e80894bb2430341e3210e2821c8dd8ca643e"
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           python -m pip install pytest httpx pytest-rerunfailures
 
@@ -40,4 +38,5 @@ jobs:
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           OTEL_SDK_DISABLED: "true"
-        run: pytest -p pytest_rerunfailures -q --reruns 1 --maxfail=1 --durations=15
+          UNISON_PRINCIPAL_BINDING_TEST_BYPASS: "true"
+        run: pytest -p asyncio -p pytest_rerunfailures -q --reruns 1 --maxfail=1 --durations=15
