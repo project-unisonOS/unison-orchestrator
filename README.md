@@ -13,6 +13,10 @@ Core service (active). The implemented server is bootstrapped from `src/server.p
 - Replay and event-graph helpers in `src/orchestrator/replay.py` and `src/orchestrator/api/event_graph.py`.
 - Router configuration/admin endpoints and health/metrics endpoints.
 - Dashboard refresh, workflow recall/design, comms, payments, capability, and actuation flows covered by the current test suite.
+- A bounded Phase 7 workflow engine with deterministic calendar, mail, task,
+  household, contact, research, and travel providers; exact approvals;
+  idempotent retry; cancellation/compensation; provider replacement; minimized
+  disclosure; and local outcome evidence.
 
 ## Important route groups
 - `GET /health`, `GET /readyz`, `GET /ready`, `GET /metrics`
