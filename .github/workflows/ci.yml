@@ -11,7 +11,7 @@ jobs:
     with:
       python-version: "3.12"
       working-directory: "."
-      unison-common-ref: "04fed97fae46959485e7fc52d6d9e06c7d8262aa"
+      unison-common-ref: "cf6f75c6c6f0956e9d590b9296d9d08a15a43578"
       enable-principal-binding-test-bypass: true
 
   container-supply-chain:
