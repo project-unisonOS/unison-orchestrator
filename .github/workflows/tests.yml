@@ -30,7 +30,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip wheel
-          python -m pip install "git+https://github.com/project-unisonOS/unison-common.git@0ceb765bf6e74e2c69fa1eac309c0318745b1fd9"
+          python -m pip install "git+https://github.com/project-unisonOS/unison-common.git@9463f917c7610594f57bae4847e3ddae48822486"
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           python -m pip install pytest httpx pytest-rerunfailures
 

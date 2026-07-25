@@ -109,9 +109,12 @@ def compare_expressions(left: SemanticExpression, right: SemanticExpression) -> 
     for code, lhs, rhs in (
         ("required-meaning", set(left.required_node_ids), set(right.required_node_ids)),
         ("available-actions", set(left.action_ids), set(right.action_ids)),
+        ("provenance", set(left.provenance_source_ids), set(right.provenance_source_ids)),
     ):
         if lhs != rhs:
             findings.append(EquivalenceFinding(severity="error", code=code, detail=f"Mismatch: {sorted(lhs ^ rhs)}"))
+    if left.action_risk != right.action_risk:
+        findings.append(EquivalenceFinding(severity="error", code="action-risk", detail="Action risk changed between expressions"))
     if bool(left.fallback) != bool(right.fallback):
         findings.append(EquivalenceFinding(severity="error", code="recovery", detail="Recovery is unavailable in one expression"))
     return EquivalenceReport(

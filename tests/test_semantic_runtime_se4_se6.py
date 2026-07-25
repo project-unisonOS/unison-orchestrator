@@ -62,6 +62,13 @@ def test_equivalence_detects_semantic_loss():
     assert not compare_expressions(left, right).equivalent
 
 
+def test_equivalence_detects_changed_risk_and_provenance():
+    left = SemanticExpression(experience_id="e", modality="conversation", summary="x", action_ids=["pay"], action_risk={"pay": "high"}, provenance_source_ids=["bill"])
+    right = left.model_copy(update={"modality": "visual", "action_risk": {"pay": "low"}, "provenance_source_ids": []})
+    report = compare_expressions(left, right)
+    assert {finding.code for finding in report.findings} == {"action-risk", "provenance"}
+
+
 def test_interpreter_prefers_structured_sources_and_blocks_stale_ambiguous_actions():
     now = datetime.now(timezone.utc)
     api = SemanticObservation(
