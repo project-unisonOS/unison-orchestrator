@@ -26,6 +26,16 @@ class ResourceLease:
     task_id: str
     cpu_units: int
     memory_mb: int
+    priority: str = "interactive"
+
+
+@dataclass(frozen=True)
+class QueuedTask:
+    task_id: str
+    priority: str
+
+
+PRIORITIES = ("emergency", "accessibility", "interactive", "background")
 
 
 class HouseholdResourceScheduler:
@@ -40,7 +50,7 @@ class HouseholdResourceScheduler:
             raise ValueError("total_concurrent_tasks must be positive")
         self.total_concurrent_tasks = total_concurrent_tasks
         self._quotas: dict[str, AssistantResourceQuota] = {}
-        self._queues: dict[str, deque[str]] = {}
+        self._queues: dict[str, deque[QueuedTask]] = {}
         self._active: dict[str, dict[str, ResourceLease]] = {}
         self._rotation: deque[str] = deque()
         self._lock = RLock()
@@ -54,38 +64,46 @@ class HouseholdResourceScheduler:
                 self._active[assistant] = {}
             self._quotas[assistant] = quota
 
-    def submit(self, assistant_instance_id: str, task_id: str) -> None:
+    def submit(self, assistant_instance_id: str, task_id: str, *, priority: str = "interactive") -> None:
         with self._lock:
             quota = self._require(assistant_instance_id)
+            if priority not in PRIORITIES:
+                raise ValueError("unknown task priority")
             queue = self._queues[assistant_instance_id]
             if len(queue) >= quota.max_queued_tasks:
                 raise ResourceQuotaExceeded("assistant queue quota exhausted")
-            if task_id in queue or task_id in self._active[assistant_instance_id]:
+            if any(item.task_id == task_id for item in queue) or any(
+                    lease.task_id == task_id for lease in self._active[assistant_instance_id].values()):
                 raise ResourceQuotaExceeded("task is already scheduled")
-            queue.append(task_id)
+            queue.append(QueuedTask(task_id, priority))
 
     def dispatch_next(self) -> ResourceLease | None:
         with self._lock:
             if self.active_count >= self.total_concurrent_tasks or not self._rotation:
                 return None
-            for _ in range(len(self._rotation)):
-                assistant = self._rotation[0]
-                self._rotation.rotate(-1)
-                quota = self._quotas[assistant]
-                if not self._queues[assistant]:
-                    continue
-                if len(self._active[assistant]) >= quota.max_concurrent_tasks:
-                    continue
-                task_id = self._queues[assistant].popleft()
-                lease = ResourceLease(
-                    lease_id=f"lease_{uuid4().hex}",
-                    assistant_instance_id=assistant,
-                    task_id=task_id,
-                    cpu_units=quota.cpu_units,
-                    memory_mb=quota.memory_mb,
-                )
-                self._active[assistant][lease.lease_id] = lease
-                return lease
+            for priority in PRIORITIES:
+                for _ in range(len(self._rotation)):
+                    assistant = self._rotation[0]
+                    self._rotation.rotate(-1)
+                    quota = self._quotas[assistant]
+                    queue = self._queues[assistant]
+                    if len(self._active[assistant]) >= quota.max_concurrent_tasks:
+                        continue
+                    index = next((i for i, item in enumerate(queue) if item.priority == priority), None)
+                    if index is None:
+                        continue
+                    task = queue[index]
+                    del queue[index]
+                    lease = ResourceLease(
+                        lease_id=f"lease_{uuid4().hex}",
+                        assistant_instance_id=assistant,
+                        task_id=task.task_id,
+                        cpu_units=quota.cpu_units,
+                        memory_mb=quota.memory_mb,
+                        priority=task.priority,
+                    )
+                    self._active[assistant][lease.lease_id] = lease
+                    return lease
             return None
 
     def complete(self, lease_id: str) -> bool:
@@ -124,7 +142,7 @@ class HouseholdResourceScheduler:
         with self._lock:
             for assistant, active in self._active.items():
                 for lease in reversed(list(active.values())):
-                    self._queues[assistant].appendleft(lease.task_id)
+                    self._queues[assistant].appendleft(QueuedTask(lease.task_id, lease.priority))
                 active.clear()
 
     def _require(self, assistant_instance_id: str) -> AssistantResourceQuota:

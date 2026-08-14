@@ -49,3 +49,12 @@ def test_restart_recovers_opaque_tasks_without_exposing_content():
     assert snapshot["assistants"]["assistant-alice"]["queued_count"] == 1
     assert snapshot["contains_task_content"] is False
     assert "opaque-task-1" not in str(snapshot)
+
+
+def test_emergency_lane_preempts_interactive_work_without_breaking_owner_fairness():
+    item = scheduler()
+    item.submit("assistant-alice", "routine", priority="interactive")
+    item.submit("assistant-bob", "water-leak", priority="emergency")
+    first = item.dispatch_next()
+    assert first.task_id == "water-leak"
+    assert first.priority == "emergency"
