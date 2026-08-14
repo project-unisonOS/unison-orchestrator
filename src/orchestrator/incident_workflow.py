@@ -12,9 +12,8 @@ from .shared_incident import IncidentEngineRejected, SharedIncidentEngine
 
 
 class IncidentStore(Protocol):
-    def create(self, person_id: str, incident: HouseholdIncident, spaces: list[str]) -> HouseholdIncident: ...
-    def admit_observation(self, person_id: str, space_id: str, incident_id: str,
-                          observation: SensorObservation, spaces: list[str], at: datetime) -> dict[str, Any]: ...
+    def start(self, person_id: str, incident: HouseholdIncident, observation: SensorObservation,
+              spaces: list[str], at: datetime) -> HouseholdIncident: ...
     def update_assignment(self, person_id: str, space_id: str, incident_id: str,
                           assignment_id: str, state: str, at: datetime, spaces: list[str],
                           members: list[str]) -> HouseholdIncident: ...
@@ -39,10 +38,8 @@ class SharedIncidentWorkflow:
         incident, checklist = self.engine.assess_water_leak(
             person_id=person_id, assistant_instance_id=assistant_instance_id, space_id=space_id,
             observation=observation, at=at, electrical_hazard=electrical_hazard)
-        self.store.create(person_id, incident, authorized_space_ids)
-        self.store.admit_observation(person_id, space_id, incident.incident_id, observation,
-                                     authorized_space_ids, at)
-        return incident, checklist
+        stored = self.store.start(person_id, incident, observation, authorized_space_ids, at)
+        return stored, checklist
 
     def assignment(self, *, person_id: str, space_id: str, incident_id: str, assignment_id: str,
                    state: str, at: datetime, authorized_space_ids: list[str],
@@ -67,3 +64,47 @@ class SharedIncidentWorkflow:
         if not explanation:
             raise IncidentEngineRejected("model proposal requires an explanation")
         return ReconciledProposal(explanation, equipment, sources)
+
+
+class IncidentStorageService:
+    """IncidentStore adapter over the standard authenticated service client."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def start(self, person_id: str, incident: HouseholdIncident, observation: SensorObservation,
+              spaces: list[str], at: datetime) -> HouseholdIncident:
+        del at
+        ok, status, body = self.client.post("/v1/incidents", {
+            "person_id": person_id, "authorized_space_ids": spaces,
+            "incident": incident.model_dump(mode="json"),
+            "observation": observation.model_dump(mode="json"),
+        })
+        if not ok or status != 201 or not body:
+            raise IncidentEngineRejected("incident storage service rejected start")
+        return HouseholdIncident.model_validate(body["incident"])
+
+
+class IncidentRendererService:
+    """Publishes a semantic incident envelope; renderer failure never rolls back authority state."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def publish(self, incident: HouseholdIncident, checklist: list[str]) -> bool:
+        ok, status, _ = self.client.post("/events", {
+            "type": "household.incident.v1", "urgency": incident.severity,
+            "payload": {"incident": incident.model_dump(mode="json"), "checklist": checklist},
+        })
+        return bool(ok and status == 200)
+
+    def update_assignment(self, person_id: str, space_id: str, incident_id: str,
+                          assignment_id: str, state: str, at: datetime, spaces: list[str],
+                          members: list[str]) -> HouseholdIncident:
+        ok, status, body = self.client.post(
+            f"/v1/incidents/{incident_id}/assignments/{assignment_id}/state",
+            {"person_id": person_id, "space_id": space_id, "state": state, "at": at.isoformat(),
+             "authorized_space_ids": spaces, "household_member_ids": members})
+        if not ok or status != 200 or not body:
+            raise IncidentEngineRejected("incident storage service rejected assignment update")
+        return HouseholdIncident.model_validate(body["incident"])

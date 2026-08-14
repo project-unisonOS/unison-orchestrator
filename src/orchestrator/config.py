@@ -31,6 +31,8 @@ class ServiceEndpoints:
     consent_port: str | None = None
     payments_host: str | None = None
     payments_port: str | None = None
+    renderer_host: str = "experience-renderer"
+    renderer_port: str = "8092"
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,8 @@ class OrchestratorSettings:
             consent_port=os.getenv("UNISON_CONSENT_PORT") or None,
             payments_host=os.getenv("UNISON_PAYMENTS_HOST") or None,
             payments_port=os.getenv("UNISON_PAYMENTS_PORT") or None,
+            renderer_host=os.getenv("UNISON_RENDERER_HOST", "experience-renderer"),
+            renderer_port=os.getenv("UNISON_RENDERER_PORT", "8092"),
         )
 
         return cls(

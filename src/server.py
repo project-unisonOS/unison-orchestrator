@@ -18,6 +18,7 @@ from orchestrator.api.input import register_input_routes
 from orchestrator.api.skills import register_skill_routes
 from orchestrator.api.voice import register_voice_routes
 from orchestrator.api.payments import register_payment_routes
+from orchestrator.api.incidents import register_incident_routes
 from orchestrator.replay import configure_replay_store, register_replay_routes
 from orchestrator.skills import build_skill_state
 from unison_common import (
@@ -231,6 +232,7 @@ if _companion_manager:
 _payment_service = register_payment_routes(app, metrics=_metrics, service_clients=service_clients)
 
 register_replay_routes(app)
+register_incident_routes(app, service_clients=service_clients)
 
 if os.getenv("UNISON_ENABLE_DEV_ROUTES", "false").lower() in {"1", "true", "yes", "on"}:
     register_dev_routes(app)
