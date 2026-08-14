@@ -7,11 +7,13 @@ from unison_common.contracts.v1.shared_incident import OfflineKnowledgePack, Sen
 from unison_common.principal_middleware import get_current_principal
 
 from ..incident_workflow import IncidentRendererService, IncidentStorageService, SharedIncidentWorkflow
+from ..incident_delivery import IncidentDeliveryOutbox
 from ..shared_incident import IncidentEngineRejected, SharedIncidentEngine
 
 
-def register_incident_routes(app, *, service_clients) -> None:
+def register_incident_routes(app, *, service_clients, outbox=None) -> None:
     api = APIRouter()
+    delivery_outbox = outbox or IncidentDeliveryOutbox()
 
     @api.post("/v1/incidents/simulations/water-leak", status_code=201)
     def simulate_water_leak(body: dict = Body(...)):
@@ -32,10 +34,28 @@ def register_incident_routes(app, *, service_clients) -> None:
                 electrical_hazard=body.get("electrical_hazard") is True)
             delivered = False
             if service_clients.renderer:
-                delivered = IncidentRendererService(service_clients.renderer).publish(incident, checklist)
+                renderer = IncidentRendererService(service_clients.renderer)
+                delivered = renderer.publish(incident, checklist)
+                if not delivered:
+                    delivery_outbox.enqueue(incident.incident_id, renderer.envelope(incident, checklist))
             return {"incident": incident.model_dump(mode="json"), "checklist": checklist,
                     "renderer_delivered": delivered, "evidence_class": "simulation"}
         except (IncidentEngineRejected, TypeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.post("/v1/incidents/delivery/retry")
+    def retry_incident_delivery():
+        if not service_clients.renderer:
+            raise HTTPException(status_code=503, detail="renderer service is unavailable")
+        delivered = 0
+        remaining = 0
+        for path, envelope in delivery_outbox.pending():
+            ok, status, _ = service_clients.renderer.post("/events", envelope)
+            if ok and status == 200:
+                delivery_outbox.acknowledge(path)
+                delivered += 1
+            else:
+                remaining += 1
+        return {"delivered": delivered, "remaining": remaining, "evidence_class": "simulation"}
 
     app.include_router(api)

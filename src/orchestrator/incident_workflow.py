@@ -84,20 +84,6 @@ class IncidentStorageService:
             raise IncidentEngineRejected("incident storage service rejected start")
         return HouseholdIncident.model_validate(body["incident"])
 
-
-class IncidentRendererService:
-    """Publishes a semantic incident envelope; renderer failure never rolls back authority state."""
-
-    def __init__(self, client):
-        self.client = client
-
-    def publish(self, incident: HouseholdIncident, checklist: list[str]) -> bool:
-        ok, status, _ = self.client.post("/events", {
-            "type": "household.incident.v1", "urgency": incident.severity,
-            "payload": {"incident": incident.model_dump(mode="json"), "checklist": checklist},
-        })
-        return bool(ok and status == 200)
-
     def update_assignment(self, person_id: str, space_id: str, incident_id: str,
                           assignment_id: str, state: str, at: datetime, spaces: list[str],
                           members: list[str]) -> HouseholdIncident:
@@ -108,3 +94,21 @@ class IncidentRendererService:
         if not ok or status != 200 or not body:
             raise IncidentEngineRejected("incident storage service rejected assignment update")
         return HouseholdIncident.model_validate(body["incident"])
+
+
+class IncidentRendererService:
+    """Publishes a semantic incident envelope; renderer failure never rolls back authority state."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def publish(self, incident: HouseholdIncident, checklist: list[str]) -> bool:
+        ok, status, _ = self.client.post("/events", self.envelope(incident, checklist))
+        return bool(ok and status == 200)
+
+    @staticmethod
+    def envelope(incident: HouseholdIncident, checklist: list[str]) -> dict[str, Any]:
+        return {
+            "type": "household.incident.v1", "urgency": incident.severity,
+            "payload": {"incident": incident.model_dump(mode="json"), "checklist": checklist},
+        }
