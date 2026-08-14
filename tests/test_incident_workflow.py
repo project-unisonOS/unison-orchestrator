@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from orchestrator.incident_workflow import SharedIncidentWorkflow
+from orchestrator.incident_workflow import IncidentRendererService, IncidentStorageService, SharedIncidentWorkflow
 from orchestrator.shared_incident import IncidentEngineRejected, SharedIncidentEngine
 from test_shared_incident import observation, pack
 
@@ -15,14 +15,11 @@ class MemoryStore:
         self.incident = None
         self.observation = None
 
-    def create(self, person_id, incident, spaces):
+    def start(self, person_id, incident, item, spaces, at):
         assert incident.space_id in spaces
         self.incident = incident
-        return incident
-
-    def admit_observation(self, person_id, space_id, incident_id, item, spaces, at):
         self.observation = item
-        return {"status": "accepted"}
+        return incident
 
     def update_assignment(self, person_id, space_id, incident_id, assignment_id, state, at, spaces, members):
         assignment = self.incident.assignments[0].model_copy(update={"state": state,
@@ -61,3 +58,48 @@ def test_model_proposals_are_reconciled_and_cannot_override_authority():
             {"explanation": "Continue", "equipment_ids": ["washer-1"], "source_ids": ["manual-1"],
              "continue_despite_stop_rule": True}, selected_equipment_ids={"washer-1"},
             approved_source_ids={"manual-1"}, active_stop_rules=["electrical hazard"])
+
+
+def test_service_adapter_uses_versioned_storage_boundary_and_surfaces_failure():
+    incident, _ = SharedIncidentEngine(pack()).assess_water_leak(
+        person_id="alice", assistant_instance_id="a", space_id="shared:home",
+        observation=observation(), at=NOW)
+
+    class Client:
+        def __init__(self, accepted=True):
+            self.accepted = accepted
+            self.calls = []
+
+        def post(self, path, payload):
+            self.calls.append((path, payload))
+            if not self.accepted:
+                return False, 503, None
+            return True, 201, {"incident": incident.model_dump(mode="json")}
+
+    client = Client()
+    stored = IncidentStorageService(client).start("alice", incident, observation(), ["shared:home"], NOW)
+    assert stored.incident_id == incident.incident_id
+    assert client.calls[0][0] == "/v1/incidents"
+    with pytest.raises(IncidentEngineRejected, match="storage service"):
+        IncidentStorageService(Client(False)).start("alice", incident, observation(), ["shared:home"], NOW)
+
+
+def test_renderer_delivery_is_semantic_and_failure_is_non_authoritative():
+    incident, checklist = SharedIncidentEngine(pack()).assess_water_leak(
+        person_id="alice", assistant_instance_id="a", space_id="shared:home",
+        observation=observation(), at=NOW)
+
+    class Client:
+        def __init__(self, result):
+            self.result = result
+            self.payload = None
+
+        def post(self, path, payload):
+            self.payload = payload
+            return self.result
+
+    client = Client((True, 200, {"ok": True}))
+    assert IncidentRendererService(client).publish(incident, checklist) is True
+    assert client.payload["type"] == "household.incident.v1"
+    assert client.payload["payload"]["incident"]["physical_actuation_allowed"] is False
+    assert IncidentRendererService(Client((False, 503, None))).publish(incident, checklist) is False

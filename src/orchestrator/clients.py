@@ -100,6 +100,7 @@ class ServiceClients:
     actuation: ServiceHttpClient | None = None
     consent: ServiceHttpClient | None = None
     payments: ServiceHttpClient | None = None
+    renderer: ServiceHttpClient | None = None
 
     @classmethod
     def from_endpoints(cls, endpoints: ServiceEndpoints) -> "ServiceClients":
@@ -135,4 +136,5 @@ class ServiceClients:
             actuation=actuation_client,
             consent=consent_client,
             payments=payments_client,
+            renderer=ServiceHttpClient(endpoints.renderer_host, endpoints.renderer_port),
         )
