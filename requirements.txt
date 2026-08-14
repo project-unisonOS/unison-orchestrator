@@ -21,3 +21,4 @@ opentelemetry-propagator-b3==1.44.0
 opentelemetry-propagator-jaeger==1.44.0
 
 # unison-common package (local install)
+unison-common @ git+https://github.com/project-unisonOS/unison-common.git@8ef6b99
