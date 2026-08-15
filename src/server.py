@@ -111,15 +111,6 @@ app.add_middleware(
     allow_test_bypass=True,
 )
 
-# Multimodal capabilities
-try:
-    from unison_common.multimodal import CapabilityClient
-    _capabilities = CapabilityClient.from_env()
-    _capabilities.refresh()
-    publish_capabilities_to_context()
-except Exception:
-    _capabilities = None
-
 # Push manifest into context-graph at startup
 def publish_capabilities_to_context():
     if not _capabilities:
@@ -131,6 +122,15 @@ def publish_capabilities_to_context():
             logger.warning("Failed to publish capabilities to context-graph: status=%s", status)
     except Exception as exc:
         logger.warning("Error publishing capabilities to context-graph: %s", exc)
+
+# Multimodal capabilities
+try:
+    from unison_common.multimodal import CapabilityClient
+    _capabilities = CapabilityClient.from_env()
+    _capabilities.refresh()
+    publish_capabilities_to_context()
+except Exception:
+    _capabilities = None
 
 # M4: Initialize idempotency manager
 idempotency_config = IdempotencyConfig()
@@ -306,18 +306,6 @@ async def capabilities():
         raise HTTPException(status_code=503, detail="capabilities unavailable")
     manifest = _capabilities.manifest or {}
     return {"manifest": manifest, "displays": _capabilities.modality_count("displays")}
-
-
-def publish_capabilities_to_context():
-    if not _capabilities:
-        return
-    try:
-        manifest = _capabilities.manifest or {}
-        ok, status, _ = service_clients.context.post("/capabilities", manifest)
-        if not ok:
-            logger.warning("Failed to publish capabilities to context-graph: status=%s", status)
-    except Exception as exc:
-        logger.warning("Error publishing capabilities to context-graph: %s", exc)
 
 
 @app.on_event("startup")
