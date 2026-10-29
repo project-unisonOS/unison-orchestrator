@@ -157,7 +157,7 @@ def run_input_event(
 
     with trace.span("input_received", {"modality": input_event.modality, "source": input_event.source}):
         trace.emit_event("input_received", {"modality": input_event.modality})
-        _append("input_received", attrs={"modality": input_event.modality, "source": input_event.source}, payload={"payload": input_event.payload})
+        _append("input_received", attrs={"modality": input_event.modality, "source": input_event.source}, payload={})
 
     with trace.span("session_created", {"session_id": sid}):
         _ = IntentSession(session_id=sid, trace_id=trace.trace_id, person_id=person_id, created_at_unix_ms=_now_unix_ms())
@@ -296,6 +296,10 @@ def run_input_event(
 
     if not policy.allowed:
         tool_result = ActionResult(action_id=action.action_id, ok=False, error=f"policy denied: {policy.reason}")
+    elif policy.require_confirmation:
+        # No approval transport exists on this ingress yet. Fail closed until
+        # exact, principal-bound approval can be verified by the executor.
+        tool_result = ActionResult(action_id=action.action_id, ok=False, error="confirmation_required")
     else:
         # Populate person/session for VDI tasks.
         if action.kind == "vdi":
