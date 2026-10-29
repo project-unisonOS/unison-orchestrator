@@ -80,6 +80,34 @@ def test_conflicting_same_revision_is_not_silently_selected():
         build_brief("alice", DAY, data)
 
 
+@pytest.mark.parametrize("change", [
+    {"kind": "vendor_score"}, {"kind": "inference"},
+    {"missing_reason": "different explanation"},
+    {"measured_start": "2026-10-28T01:00:00+00:00"},
+    {"measured_end": "2026-10-28T22:00:00+00:00"},
+    {"consent_id": "other-consent"}, {"original_payload": {"fixture_value": 999}},
+])
+def test_interpretation_conflicts_fail_in_both_orders(change):
+    data = fixture_observations()
+    data.append({**data[0], **change})
+    for ordered in (data, list(reversed(data))):
+        with pytest.raises(WellnessDenied):
+            build_brief("alice", DAY, ordered)
+
+
+def test_equivalent_syndicated_records_are_order_independent():
+    data = fixture_observations()
+    data.append({**data[0], "ingestion_source": "syndication", "observation_id": "copy"})
+    assert build_brief("alice", DAY, data) == build_brief("alice", DAY, list(reversed(data)))
+
+
+def test_newer_revision_cannot_hide_conflicting_older_revisions():
+    data = [observation(revision=2), observation(), observation(kind="inference")]
+    for ordered in (data, list(reversed(data))):
+        with pytest.raises(WellnessDenied):
+            build_brief("alice", DAY, ordered)
+
+
 def test_multiple_metrics_in_one_upstream_record_remain_distinct():
     data = [observation(upstream_id="daily-source-record", source="synthetic-device"),
             observation("steps", value=6000, upstream_id="daily-source-record", source="synthetic-device")]

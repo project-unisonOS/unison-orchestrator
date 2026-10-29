@@ -75,16 +75,23 @@ class ObservationReader(Protocol):
 
 def _deduplicate(observations):
     selected = {}
+    revisions = {}
+    # Transport/citation metadata may differ for syndicated copies. All other
+    # fields, including interpretation and original payload, must agree.
+    transport_fields = {"observation_id", "source_record_id", "ingestion_source", "ingested_at"}
     for observation in observations:
         key = (observation.source, observation.upstream_id, observation.metric)
+        revision_key = (*key, observation.revision)
+        semantic = observation.model_dump(exclude=transport_fields)
+        if revision_key in revisions and revisions[revision_key] != semantic:
+            raise WellnessDenied("Conflicting source revisions require reconciliation")
+        revisions[revision_key] = semantic
         prior = selected.get(key)
-        if prior and prior.revision == observation.revision:
-            fields = ("value", "unit", "metric", "source_day", "device", "method", "quality", "original_timezone")
-            if any(getattr(prior, field) != getattr(observation, field) for field in fields):
-                raise WellnessDenied("Conflicting source revisions require reconciliation")
-        if prior is None or observation.revision > prior.revision:
+        citation = lambda item: (item.observation_id, item.source_record_id, item.ingestion_source, item.ingested_at)
+        if (prior is None or observation.revision > prior.revision
+                or (observation.revision == prior.revision and citation(observation) < citation(prior))):
             selected[key] = observation
-    return list(selected.values())
+    return sorted(selected.values(), key=lambda item: (-item.source_day.toordinal(), item.source, item.upstream_id, item.metric))
 
 
 def build_brief(person_id: str, as_of: date, raw: list[dict]) -> dict:
