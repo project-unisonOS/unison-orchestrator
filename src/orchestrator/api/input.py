@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
+from pydantic import ValidationError
+from orchestrator.wellness import WellnessDenied
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -28,6 +31,18 @@ def register_input_routes(app) -> None:
         if os.getenv("UNISON_PHASE1_PIPELINE", "false").lower() in {"1", "true", "yes", "on"}:
             raise HTTPException(status_code=503, detail="Legacy phase1 ingress is disabled pending authority convergence")
         input_event = InputEventEnvelope(**{**body, "person_id": principal.person_id})
+        if input_event.payload.get("intent") == "wellness.daily":
+            journey = getattr(app.state, "synthetic_wellness_journey", None)
+            if journey is None:
+                raise HTTPException(status_code=503, detail="Synthetic wellness journey is not configured")
+            try:
+                day = date.fromisoformat(input_event.payload["source_day"])
+                brief = journey.run(principal=principal, as_of=day, operation_id=input_event.event_id)
+            except WellnessDenied:
+                raise HTTPException(status_code=403, detail="Wellness request denied") from None
+            except (KeyError, TypeError, ValueError, ValidationError):
+                raise HTTPException(status_code=400, detail="Invalid synthetic wellness data or source day") from None
+            return {"ok": True, "person_id": principal.person_id, "trace_id": input_event.trace_id, "brief": brief}
         # Speech streaming events are ingested into the SpeechIO adapter (if enabled)
         # and handled asynchronously by the voice loop.
         if input_event.modality == "speech":
