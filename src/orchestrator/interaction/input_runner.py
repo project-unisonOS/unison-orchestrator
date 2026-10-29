@@ -17,6 +17,7 @@ from orchestrator.interaction.planner_stage import PlannerStage
 from orchestrator.interaction.policy_gate import PolicyGate
 from orchestrator.interaction.rom_builder import RomBuilder
 from orchestrator.interaction.router_stage import RouterStage
+from orchestrator.interaction.trace_file import write_input_trace
 from orchestrator.interaction.tools import ToolRegistry
 from orchestrator.interaction.write_behind import ContextWriteBehindQueue
 from orchestrator.interaction.vdi_executor import VdiExecutor
@@ -157,7 +158,7 @@ def run_input_event(
 
     with trace.span("input_received", {"modality": input_event.modality, "source": input_event.source}):
         trace.emit_event("input_received", {"modality": input_event.modality})
-        _append("input_received", attrs={"modality": input_event.modality, "source": input_event.source}, payload={"payload": input_event.payload})
+        _append("input_received", attrs={"modality": input_event.modality, "source": input_event.source}, payload={})
 
     with trace.span("session_created", {"session_id": sid}):
         _ = IntentSession(session_id=sid, trace_id=trace.trace_id, person_id=person_id, created_at_unix_ms=_now_unix_ms())
@@ -269,7 +270,7 @@ def run_input_event(
         tool_result = ActionResult(action_id="none", ok=False, error="planner produced no actions")
         policy = PolicyDecision(allowed=False, reason="no actions")
         rom = rom_builder.build(trace_id=trace.trace_id, session_id=sid, person_id=person_id or "unknown", tool_result=tool_result, policy=policy)
-        trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json")) if write_trace else ""
+        trace_path = write_input_trace(trace, trace_dir) if write_trace else ""
         return InputRunResult(
             trace_id=trace.trace_id,
             session_id=sid,
@@ -296,6 +297,10 @@ def run_input_event(
 
     if not policy.allowed:
         tool_result = ActionResult(action_id=action.action_id, ok=False, error=f"policy denied: {policy.reason}")
+    elif policy.require_confirmation:
+        # No approval transport exists on this ingress yet. Fail closed until
+        # exact, principal-bound approval can be verified by the executor.
+        tool_result = ActionResult(action_id=action.action_id, ok=False, error="confirmation_required")
     else:
         # Populate person/session for VDI tasks.
         if action.kind == "vdi":
@@ -368,7 +373,7 @@ def run_input_event(
     trace.emit_event("completed", {"status": status.value})
     _append("completed", attrs={"status": status.value})
 
-    trace_path = str(trace.write_json(f"{trace_dir}/{trace.trace_id}.json")) if write_trace else ""
+    trace_path = write_input_trace(trace, trace_dir) if write_trace else ""
     return InputRunResult(
         trace_id=trace.trace_id,
         session_id=sid,

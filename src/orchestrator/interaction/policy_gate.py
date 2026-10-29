@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -14,7 +13,7 @@ class PolicyGate:
     """
     Policy gate for proposed actions.
 
-    Phase 2: call `unison-policy` when clients are available; otherwise fall back to a stub.
+    Missing or unavailable policy authority denies execution.
     """
 
     clients: Optional[ServiceClients] = None
@@ -53,9 +52,8 @@ class PolicyGate:
                 require_confirmation = decision.get("require_confirmation", False) is True
                 reason = str(decision.get("reason") or "policy")
             else:
-                fail_open = os.getenv("UNISON_POLICY_FAIL_OPEN", "false").lower() in {"1", "true", "yes", "on"}
-                allowed = fail_open
-                reason = "policy_unavailable_fail_open" if fail_open else "policy_unavailable_fail_closed"
+                allowed = False
+                reason = "policy_unavailable_fail_closed"
             if trace:
                 trace.emit_event(
                     "policy_decision",
@@ -74,8 +72,4 @@ class PolicyGate:
                 required_scopes=list((action.policy_context or {}).get("scopes") or []),
             )
 
-        # Stub path (Phase 1 compatibility)
-        text = str((action.args or {}).get("text", ""))
-        if "deny:" in text.lower():
-            return PolicyDecision(allowed=False, reason="stub deny rule matched", require_confirmation=False)
-        return PolicyDecision(allowed=True)
+        return PolicyDecision(allowed=False, reason="policy_not_configured")

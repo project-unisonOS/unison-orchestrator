@@ -51,7 +51,8 @@ def test_thin_slice_emits_renderer_event_and_propagates_trace_headers(tmp_path, 
     assert "intent.recognized" in types
     assert "rom.render" in types
 
-    trace_path = tmp_path / f"{result.trace_id}.json"
+    from pathlib import Path
+    trace_path = Path(result.trace_path)
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     assert any(evt.get("name") == "renderer_emitted" and (evt.get("attrs") or {}).get("ok") is True for evt in trace["events"])
     assert any(span.get("name") == "renderer_emitted" for span in trace["spans"])

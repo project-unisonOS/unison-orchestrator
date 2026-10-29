@@ -1,34 +1,16 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from orchestrator.interaction.input_runner import run_input_event
-from orchestrator.phase1.runner import Phase1RunConfig, run_phase1_input_event
 from unison_common import InputEventEnvelope
-from unison_common.auth import verify_token
+from unison_common.principal import PrincipalContext
+from orchestrator.api.principal import require_bound_person
 from unison_common.contracts.v1.speechio import TranscriptEvent
-
-_security = HTTPBearer(auto_error=False)
-
-
-async def _optional_auth(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_security),
-) -> Dict[str, Any]:
-    test_mode = bool(os.getenv("PYTEST_CURRENT_TEST")) or os.getenv(
-        "DISABLE_AUTH_FOR_TESTS", "false"
-    ).lower() == "true"
-
-    if credentials is None:
-        if test_mode:
-            return {"username": "test-user", "roles": ["admin"]}
-        raise HTTPException(status_code=401, detail="Authorization required")
-
-    return await verify_token(credentials)  # type: ignore[arg-type]
 
 
 def register_input_routes(app) -> None:
@@ -37,9 +19,15 @@ def register_input_routes(app) -> None:
     @api.post("/input")
     async def ingest_input(
         body: Dict[str, Any] = Body(...),
-        _user: Dict[str, Any] = Depends(_optional_auth),
+        principal: PrincipalContext = Depends(require_bound_person),
     ):
-        input_event = InputEventEnvelope(**body)
+        trace_id = body.get("trace_id")
+        if (not isinstance(trace_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", trace_id)
+                or trace_id.upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)), *(f"LPT{i}" for i in range(10))}):
+            raise HTTPException(status_code=400, detail="Invalid trace identifier")
+        if os.getenv("UNISON_PHASE1_PIPELINE", "false").lower() in {"1", "true", "yes", "on"}:
+            raise HTTPException(status_code=503, detail="Legacy phase1 ingress is disabled pending authority convergence")
+        input_event = InputEventEnvelope(**{**body, "person_id": principal.person_id})
         # Speech streaming events are ingested into the SpeechIO adapter (if enabled)
         # and handled asynchronously by the voice loop.
         if input_event.modality == "speech":
@@ -53,7 +41,7 @@ def register_input_routes(app) -> None:
                         # Preserve identity/session for the voice loop (streaming SpeechIO ingress).
                         if isinstance(evt.attrs, dict):
                             if isinstance(input_event.person_id, str) and input_event.person_id:
-                                evt.attrs.setdefault("person_id", input_event.person_id)
+                                evt.attrs["person_id"] = principal.person_id
                             if isinstance(input_event.session_id, str) and input_event.session_id:
                                 evt.attrs.setdefault("session_id", input_event.session_id)
                         adapter.ingest(evt)
@@ -71,20 +59,12 @@ def register_input_routes(app) -> None:
                 renderer_url = f"http://{host}:{port}"
         if not renderer_url:
             renderer_url = os.getenv("EXPERIENCE_RENDERER_URL") or os.getenv("RENDERER_URL")
-        use_phase1 = os.getenv("UNISON_PHASE1_PIPELINE", "false").lower() in {"1", "true", "yes", "on"}
-        if use_phase1:
-            result = run_phase1_input_event(
-                input_event=input_event,
-                clients=clients,
-                cfg=Phase1RunConfig(trace_dir=trace_dir, renderer_url=renderer_url),
-            )
-        else:
-            result = run_input_event(
+        result = run_input_event(
                 input_event=input_event,
                 clients=clients,
                 trace_dir=trace_dir,
                 renderer_url=renderer_url,
-            )
+        )
         return {
             "ok": result.tool_result.ok,
             "trace_id": result.trace_id,
