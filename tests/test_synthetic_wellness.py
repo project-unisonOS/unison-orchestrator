@@ -80,6 +80,12 @@ def test_conflicting_same_revision_is_not_silently_selected():
         build_brief("alice", DAY, data)
 
 
+def test_multiple_metrics_in_one_upstream_record_remain_distinct():
+    data = [observation(upstream_id="daily-source-record", source="synthetic-device"),
+            observation("steps", value=6000, upstream_id="daily-source-record", source="synthetic-device")]
+    assert build_brief("alice", DAY, data)["retained_observations"] == 2
+
+
 @pytest.mark.parametrize("change", [{"value": float("nan")}, {"value": True}, {"unit": "count"},
                                     {"synthetic": False}, {"quality": "missing"}, {"original_timezone": "not-a-zone"}])
 def test_bad_or_real_observations_rejected(change):

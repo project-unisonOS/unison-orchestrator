@@ -76,7 +76,7 @@ class ObservationReader(Protocol):
 def _deduplicate(observations):
     selected = {}
     for observation in observations:
-        key = (observation.source, observation.upstream_id)
+        key = (observation.source, observation.upstream_id, observation.metric)
         prior = selected.get(key)
         if prior and prior.revision == observation.revision:
             fields = ("value", "unit", "metric", "source_day", "device", "method", "quality", "original_timezone")
