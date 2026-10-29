@@ -9,4 +9,6 @@ def test_run_thin_slice_writes_trace(tmp_path):
     assert result.policy.allowed is False
     assert result.policy.reason == "policy_not_configured"
     assert result.trace_id
-    assert tmp_path.joinpath(f"{result.trace_id}.json").exists()
+    from pathlib import Path
+    assert Path(result.trace_path).is_file()
+    assert Path(result.trace_path).parent == tmp_path

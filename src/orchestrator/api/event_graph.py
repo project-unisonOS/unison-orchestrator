@@ -20,6 +20,8 @@ def register_event_graph_routes(app) -> None:
         principal: PrincipalContext = Depends(require_bound_person),
     ):
         batch = EventGraphAppend(**{**body, "person_id": principal.person_id})
+        for event in batch.events:
+            event.person_id = principal.person_id
         count = store.append(batch)
         return {"ok": True, "appended": count, "trace_id": batch.trace_id}
 

@@ -15,6 +15,7 @@ from orchestrator.api.admin import register_admin_routes
 from orchestrator.api.dev import register_dev_routes
 from orchestrator.api.event_graph import register_event_graph_routes
 from orchestrator.api.input import register_input_routes
+from orchestrator.api.idempotency import PrincipalIdempotencyMiddleware
 from orchestrator.api.skills import register_skill_routes
 from orchestrator.api.voice import register_voice_routes
 from orchestrator.api.payments import register_payment_routes
@@ -104,12 +105,6 @@ logger.info("Context baton middleware enabled (optional validation)")
 
 # Audit logging with header redaction (no client IP in default)
 app.add_middleware(AuditMiddleware, service_name="unison-orchestrator")
-app.add_middleware(
-    PrincipalBindingMiddleware,
-    service_name="orchestrator",
-    public_paths={"/", "/health", "/healthz", "/ready", "/readyz", "/metrics", "/startup/status", "/docs", "/openapi.json"},
-    allow_test_bypass=True,
-)
 
 # Push manifest into context-graph at startup
 def publish_capabilities_to_context():
@@ -136,7 +131,15 @@ except Exception:
 idempotency_config = IdempotencyConfig()
 idempotency_config.ttl_seconds = 24 * 60 * 60  # 24 hours
 # Note: Using in-memory store for M4; Redis integration can be added later
-app.add_middleware(IdempotencyMiddleware, ttl_seconds=idempotency_config.ttl_seconds)
+app.add_middleware(PrincipalIdempotencyMiddleware, ttl_seconds=idempotency_config.ttl_seconds)
+# Starlette executes later registrations first. Authenticate and check active
+# token state on every request, including cache hits.
+app.add_middleware(
+    PrincipalBindingMiddleware,
+    service_name="orchestrator",
+    public_paths={"/", "/health", "/healthz", "/ready", "/readyz", "/metrics", "/startup/status", "/docs", "/openapi.json"},
+    allow_test_bypass=True,
+)
 
 # Add idempotency key requirement for critical endpoints (optional)
 if os.getenv("ENABLE_IDEMPOTENCY_REQUIRED", "false").lower() == "true":

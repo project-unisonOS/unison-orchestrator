@@ -89,6 +89,36 @@ def input_body():
                 payload={"text": "SYNTHETIC_PRIVATE_WELLNESS_DETAIL"}, session_id="test-session", auth={})
 
 
+@pytest.mark.parametrize("content_type", ["application/vnd.unison+json", "Application/JSON"])
+@pytest.mark.parametrize("route", ["event", "speech"])
+def test_alternate_json_cannot_persist_nested_identity(boundary, content_type, route):
+    client, headers, _, _ = boundary
+    if route == "event":
+        event = new_event(trace_id="alternate-trace", event_type="fixture", person_id="bob")
+        body = {"trace_id": "alternate-trace", "events": [event.model_dump(mode="json")]}
+        path = "/event-graph/append"
+    else:
+        body = {**input_body(), "modality": "speech", "payload": {"speechio": {
+            "type": "transcript.final", "attrs": {"person_id": "bob"}}}}
+        path = "/input"
+    response = client.post(path, content=json.dumps(body), headers={**headers(), "Content-Type": content_type})
+    assert response.status_code == 403
+
+
+def test_phase1_switch_cannot_select_legacy_authority(boundary, monkeypatch):
+    client, headers, _, _ = boundary
+    monkeypatch.setenv("UNISON_PHASE1_PIPELINE", "true")
+    response = client.post("/input", json=input_body(), headers=headers())
+    assert response.status_code == 503
+
+
+@pytest.mark.parametrize("trace_id", ["../escape", "..\\escape", "C:\\escape", "/escape", "CON", "a/b"])
+def test_trace_path_is_not_caller_controlled(boundary, trace_id):
+    client, headers, _, _ = boundary
+    response = client.post("/input", json={**input_body(), "trace_id": trace_id}, headers=headers())
+    assert response.status_code == 400
+
+
 def test_input_binds_omitted_person(boundary):
     client, headers, _, _ = boundary
     response = client.post("/input", json=input_body(), headers=headers())
@@ -181,3 +211,31 @@ def test_routes_fail_closed_without_authentication_middleware(monkeypatch, tmp_p
     with TestClient(app) as client:
         assert client.post("/input", json=input_body()).status_code == 403
         assert client.post("/event-graph/query", json={}).status_code == 403
+
+
+def test_production_cache_rechecks_authentication_and_separates_people(boundary, monkeypatch):
+    import uuid
+    from unison_common.multimodal import CapabilityClient
+    monkeypatch.setattr(CapabilityClient, "refresh", lambda *a: None)
+    from orchestrator.clients import ServiceHttpClient
+    monkeypatch.setattr(ServiceHttpClient, "post", lambda *a, **kw: (False, 503, None))
+    monkeypatch.setattr(ServiceHttpClient, "get", lambda *a, **kw: (False, 503, None))
+    from src import server as production
+    _, headers, revoked, _ = boundary
+    # Exercise the actual production middleware stack without starting workers.
+    production.app.middleware_stack = None
+    monkeypatch.setitem(production.app.state._state, "service_clients", None)
+    key = str(uuid.uuid4())
+    client = TestClient(production.app)
+    authorization = {**headers(), "Idempotency-Key": key}
+    first = client.post("/input", json=input_body(), headers=authorization)
+    assert first.status_code == 200
+    cached = client.post("/input", json=input_body(), headers=authorization)
+    assert cached.headers.get("Idempotency-Original-Response") == "200"
+    assert client.post("/input", json=input_body(), headers={"Idempotency-Key": key}).status_code in (401, 403)
+    revoked.add("session-alice")
+    assert client.post("/input", json=input_body(), headers=authorization).status_code in (401, 403)
+    other = client.post("/input", json=input_body(), headers={**headers("bob"), "Idempotency-Key": key})
+    assert other.status_code == 200
+    assert "Idempotency-Original-Response" not in other.headers
+    client.close()

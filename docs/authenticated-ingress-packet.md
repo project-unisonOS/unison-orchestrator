@@ -36,6 +36,20 @@ suite produced 265 passes and one outdated demo expectation that assumed policy
 absence permitted execution; that expectation now requires a traceable denial.
 Final revision verification is recorded in the PR checks and local handoff.
 
+Review follow-up: vendor JSON and case-variant JSON bodies now receive recursive
+identity validation independent of MIME matching; persisted event identities and
+speech attributes are stamped from the bound person. The legacy Phase 1 ingress
+switch fails closed. Trace identifiers are constrained and diagnostic filenames
+are generated exclusively by the server, preventing caller path selection or
+replacement of an earlier trace. Production cache lookup follows authentication
+and uses a principal-specific namespace; authenticated tests cover cache replay,
+missing/revoked authority, and another person reusing the same key.
+
+The follow-up full local suite passed 278 tests before the trace-file change;
+eight focused trace/runner tests pass after that change. Hosted final-head checks
+remain the merge gate. Cache isolation does not establish durable exactly-once
+execution or atomic spending budgets.
+
 ## Remaining gates
 
 This packet does not certify every legacy ingress, retrieval or output path.
