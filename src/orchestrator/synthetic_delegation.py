@@ -12,7 +12,7 @@ import time
 from typing import Protocol
 from unison_common.principal import PrincipalContext, PrincipalKind
 
-SCHEMA = 'synthetic-delegation.v1'
+SCHEMA = 'synthetic-delegation.v2'
 ACTIONS = {'source.read', 'source.inspect', 'report.export'}
 
 
@@ -22,6 +22,20 @@ def initial_state():
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def permission_summary(terms):
+    if not terms:return ''
+    from datetime import datetime, timezone
+    labels={'source.read':'read the synthetic source','source.inspect':'inspect the synthetic source','report.export':'export a synthetic report'}
+    actions=[terms['action']] if 'action' in terms else terms['actions']
+    account={'synthetic-account-a':'Synthetic account A','synthetic-account-b':'Synthetic account B'}[terms['account']]
+    purpose={'source.review':'Review a synthetic source','source.export':'Export a synthetic source'}[terms['purpose']]
+    recipient='only you' if terms['recipient']=='self' else 'the synthetic recipient'
+    seconds=terms['lifetime_seconds'];duration=f'{seconds//3600} hours' if seconds%3600==0 else f'{seconds} seconds'
+    expiry=datetime.fromtimestamp(terms['expires_at'],timezone.utc).isoformat()
+    deadline=datetime.fromtimestamp(terms.get('action_confirmation_expires_at',terms['confirmation_expires_at']),timezone.utc).isoformat()
+    return f"{purpose}. Allow {', '.join(labels[action] for action in actions)} from {account} for {recipient}. Delegation duration: {duration}; expires at {expiry}. Confirm before {deadline}."
 
 
 class CredentialUseAdapter(Protocol):
@@ -94,17 +108,30 @@ class DelegationEngine:
             connection = digest([person,provider,account])
             state['connections'].setdefault(connection,dict(person=person, provider=provider, account=account,
                 handle=None, repair=None, revision=0, paused=False))
-            state['grants'][gid] = dict(person=person, spec=spec, fingerprint=digest(spec), connection=connection,
-                revision=1, state='proposed', confirmation_expires=self.clock()+300, expires=self.clock()+lifetime)
+            created=self.clock()
+            grant=dict(grant_id=gid, person=person, spec=spec, connection=connection,
+                lifetime_seconds=lifetime, created_at=created, revision=1, state='proposed',
+                confirmation_expires=min(created+300,created+lifetime), expires=created+lifetime)
+            grant['fingerprint']=self._grant_binding(grant)
+            state['grants'][gid]=grant
             self.store.write(state)
         return gid
+
+    def _grant_terms(self, grant):
+        return dict(grant['spec'],grant_id=grant['grant_id'],lifetime_seconds=grant['lifetime_seconds'],
+                    created_at=grant['created_at'],expires_at=grant['expires'],
+                    confirmation_expires_at=grant['confirmation_expires'])
+
+    def _grant_binding(self, grant):
+        return digest([SCHEMA,grant['person'],self._grant_terms(grant)])
 
     def confirm(self, principal, gid, revision, fingerprint):
         person = self._person(principal,'delegation.manage')
         with self.store.transaction():
             state=self.store.read(); grant=self._owned(state,'grants',gid,person)
             if (grant['state']!='proposed' or revision!=grant['revision'] or fingerprint!=grant['fingerprint']
-                    or grant['confirmation_expires']<=self.clock()): raise PermissionError('confirmation stale')
+                    or fingerprint!=self._grant_binding(grant)
+                    or grant['confirmation_expires']<=self.clock() or grant['expires']<=self.clock()): raise PermissionError('confirmation stale')
             grant['state']='active'; grant['revision']+=1; self.store.write(state)
 
     def submit(self, principal, gid, action, recipient):
@@ -113,14 +140,15 @@ class DelegationEngine:
             state=self.store.read(); grant=self._owned(state,'grants',gid,person)
             self._allowed(grant,action,recipient)
             tid='task_'+secrets.token_urlsafe(16)
-            state['tasks'][tid]=dict(person=person, grant=gid, action=action, recipient=recipient,
+            state['tasks'][tid]=dict(task_id=tid, person=person, grant=gid, action=action, recipient=recipient,
+                confirmation_expires=min(self.clock()+300,grant['expires']),
                 binding=grant['fingerprint'], revision=1, state='confirmation' if action=='report.export' else 'ready',
                 approval=None, attempt=False)
             self.store.write(state)
         return tid
 
     def _allowed(self, grant, action, recipient):
-        if (grant['state']!='active' or grant['expires']<=self.clock()
+        if (grant['state']!='active' or grant['expires']<=self.clock() or grant['fingerprint']!=self._grant_binding(grant)
                 or action not in grant['spec']['actions'] or recipient!=grant['spec']['recipient']):
             raise PermissionError('delegation no longer authorizes task')
 
@@ -129,13 +157,14 @@ class DelegationEngine:
         with self.store.transaction():
             state=self.store.read(); task=self._owned(state,'tasks',tid,person); grant=state['grants'][task['grant']]
             self._allowed(grant,task['action'],task['recipient'])
-            if task['state']!='confirmation' or revision!=task['revision'] or binding!=self._task_binding(task,grant):
+            if (task['state']!='confirmation' or revision!=task['revision'] or binding!=self._task_binding(task,grant)
+                    or task['confirmation_expires']<=self.clock()):
                 raise PermissionError('action confirmation stale')
-            task.update(approval=dict(binding=binding,expires=self.clock()+300),state='ready',revision=task['revision']+1)
+            task.update(approval=dict(binding=binding,expires=task['confirmation_expires']),state='ready',revision=task['revision']+1)
             self.store.write(state)
 
     def _task_binding(self, task, grant):
-        return digest([grant['fingerprint'],task['action'],task['recipient'],task['grant']])
+        return digest([SCHEMA,task['task_id'],task['person'],grant['fingerprint'],task['action'],task['recipient'],task['grant'],task['confirmation_expires']])
 
     def control(self, principal, collection, identifier, command, revision):
         person=self._person(principal,'delegation.manage')
@@ -149,7 +178,8 @@ class DelegationEngine:
                 if collection=='grants':
                     if (command=='pause' and item['state']!='proposed') or (command=='resume' and item['state']!='paused'):
                         raise PermissionError('only a proposed grant can be deferred')
-                    item.update(state='paused' if command=='pause' else 'proposed',revision=item['revision']+1,confirmation_expires=self.clock()+300)
+                    item.update(state='paused' if command=='pause' else 'proposed',revision=item['revision']+1,confirmation_expires=min(self.clock()+300,item['expires']))
+                    item['fingerprint']=self._grant_binding(item)
                     self.store.write(state);return
                 if item['state'] in {'verified','revoked','deleted'}:
                     raise PermissionError('task cannot change pause state')
@@ -183,7 +213,7 @@ class DelegationEngine:
             if task['binding']!=grant['fingerprint']:raise PermissionError('task terms changed')
             if task['action']=='report.export' and (not task['approval'] or task['approval']['expires']<=self.clock()
                     or task['approval']['binding']!=self._task_binding(task,grant)):
-                task.update(state='confirmation',revision=task['revision']+1);self.store.write(state);return 'confirmation'
+                task.update(state='confirmation',revision=task['revision']+1,confirmation_expires=min(self.clock()+300,grant['expires']));self.store.write(state);return 'confirmation'
             conn=state['connections'][grant['connection']]; provider=self.providers[conn['provider']]
             if task['attempt']:
                 outcome=provider.verify(tid)
@@ -240,9 +270,9 @@ class DelegationEngine:
             state=self.store.read(); item=self._owned(state,collection,identifier,person)
             status=item['state'];choices=[];terms=None;binding=None
             if collection=='grants' and status=='proposed':
-                terms=item['spec'];binding=item['fingerprint'];choices=['confirm','not_now']
+                terms=self._grant_terms(item);binding=item['fingerprint'];choices=['confirm','not_now']
             elif collection=='tasks' and status=='confirmation':
-                grant=state['grants'][item['grant']];terms=dict(grant['spec'],action=item['action']);binding=self._task_binding(item,grant);choices=['confirm','not_now']
+                grant=state['grants'][item['grant']];terms=dict(self._grant_terms(grant),action=item['action'],task_id=item['task_id'],action_confirmation_expires_at=item['confirmation_expires']);binding=self._task_binding(item,grant);choices=['confirm','not_now']
             elif collection=='grants' and status=='active':choices=['revoke','delete']
             elif status in {'verified','revoked'}:choices=['delete']
             elif status=='waiting_repair':choices=['repair','not_now','revoke','delete']
@@ -261,18 +291,35 @@ class DelegationEngine:
             # Only controlled status prose and explicit non-secret authority terms. No raw provider/source text.
             if status=='waiting_repair':
                 grant=state['grants'][item['grant']];conn=state['connections'][grant['connection']]
+                binding=self._repair_binding(item,conn)
                 if not self.providers[conn['provider']].nonvisual:
                     description += ' The provider requires device verification; no nonvisual alternative is qualified. You can pause and retain progress.'
                     if not visual: choices=['not_now','revoke','delete']
                 else: description += ' A simulated nonvisual verification path is available.'
-            content=dict(description=description,terms=terms,choices=choices)
-            spoken=description + (' Terms: '+json.dumps(terms,sort_keys=True) if terms else '') + ' Choices: '+', '.join(choice.replace('_',' ') for choice in choices)
+            content=dict(description=description,terms=terms,choices=choices,permission_summary=permission_summary(terms))
+            spoken=description + (' '+permission_summary(terms) if terms else '') + ' Choices: '+', '.join(choice.replace('_',' ') for choice in choices)
 
             return dict(schema='intent-experience.v1',resource=identifier,revision=item['revision'],binding=binding,
                 state=status,visual=content if visual else None,audio_text=spoken if audio else None,
                 fallback='text_available' if visual and not audio else ('screenless_available' if audio else 'no_available_modality'))
 
+    def _repair_binding(self, task, connection):
+        return digest([SCHEMA,task['task_id'],task['revision'],task['binding'],connection['revision'],connection['repair']])
+
     def respond(self, principal, collection, identifier, revision, choice, binding=None):
+        if choice=='repair':
+            person=self._person(principal,'delegation.manage')
+            if collection!='tasks':raise ValueError('repair requires a task')
+            with self.store.transaction():
+                state=self.store.read();task=self._owned(state,'tasks',identifier,person)
+                if task['state']!='waiting_repair' or task['revision']!=revision:raise PermissionError('repair choice stale')
+                grant=state['grants'][task['grant']];self._allowed(grant,task['action'],task['recipient'])
+                conn=state['connections'][grant['connection']]
+                if binding!=self._repair_binding(task,conn):raise PermissionError('repair terms changed')
+                ticket=self.repair_ticket(principal,task['grant'])
+                return dict(state='repair_required',ticket=ticket,task_id=identifier,revision=revision,
+                            binding=binding,channels=['visual','screenless'] if ticket['nonvisual'] else ['visual'])
+
         if choice=='confirm':
             if collection=='grants':return self.confirm(principal,identifier,revision,binding)
             if collection=='tasks':return self.confirm_task(principal,identifier,revision,binding)
@@ -288,6 +335,40 @@ def visual_document(frame):
     content=frame['visual']
     if content is None:return None
     description=escape(content['description'])
-    terms=escape(json.dumps(content['terms'],sort_keys=True)) if content['terms'] else 'No new authority requested.'
+    terms=escape(content.get('permission_summary','')) if content['terms'] else 'No new authority requested.'
     choices=''.join('<button type="button">'+escape(choice.replace('_',' '))+'</button>' for choice in content['choices'])
     return '<!doctype html><html lang="en"><meta charset="utf-8"><title>Unison synthetic intent</title><main><h1>Your requested outcome</h1><p role="status">'+description+'</p><h2>Permission terms</h2><p>'+terms+'</p><h2>Available choices</h2>'+choices+'</main></html>'
+
+class MockOAuthAdapter(MockCredentialAdapter):
+    """Rotating synthetic access lease with a separately revocable refresh lease."""
+    def __init__(self, clock=time.time):
+        super().__init__('oauth');self.clock=clock;self.access_until={};self.refresh_until=0;self.refreshes=0
+    def complete_repair(self, challenge_id):
+        handle=super().complete_repair(challenge_id);self.access_until[handle]=self.clock()+30;self.refresh_until=self.clock()+3600;return handle
+    def refresh(self, handle):
+        if handle in self.handles and self.access_until.get(handle,0)>self.clock():return handle
+        if handle is not None and self.refresh_until>self.clock():
+            self.handles.discard(handle);new='opaque_'+secrets.token_urlsafe(16);self.handles.add(new)
+            self.access_until[new]=self.clock()+30;self.refreshes+=1;return new
+        return None
+
+
+class MockSessionAdapter(MockCredentialAdapter):
+    """A simulated reusable session expires; it has no OAuth refresh capability."""
+    def __init__(self, clock=time.time):
+        super().__init__('persistent-session');self.clock=clock;self.session_until={}
+    def complete_repair(self, challenge_id):
+        handle=super().complete_repair(challenge_id);self.session_until[handle]=self.clock()+60;return handle
+    def refresh(self, handle):
+        return handle if handle in self.handles and self.session_until.get(handle,0)>self.clock() else None
+
+
+class MockVaultAdapter(MockCredentialAdapter):
+    """Approved mock credential-use lease; lock/expiry requires another approval."""
+    def __init__(self, clock=time.time, nonvisual=True):
+        super().__init__('password-manager',nonvisual=nonvisual);self.clock=clock;self.locked=True;self.lease_until={};self.approvals=0
+    def complete_repair(self, challenge_id):
+        self.locked=False;self.approvals+=1;handle=super().complete_repair(challenge_id)
+        self.lease_until[handle]=self.clock()+120;return handle
+    def refresh(self, handle):
+        return handle if not self.locked and handle in self.handles and self.lease_until.get(handle,0)>self.clock() else None

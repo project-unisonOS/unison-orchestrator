@@ -66,7 +66,7 @@ def test_consequential_confirmation_is_distinct_and_expires(setup):
     engine,store,provider,now=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'report.export','self')
     assert engine.run(principal(),tid)=='confirmation'
     frame=engine.frame(principal(),'tasks',tid,visual=False)
-    assert frame['visual'] is None and 'report.export' in frame['audio_text']
+    assert frame['visual'] is None and 'export a synthetic report' in frame['audio_text']
     engine.respond(principal(),'tasks',tid,frame['revision'],'confirm',frame['binding'])
     assert engine.run(principal(),tid)=='waiting_repair';repair(engine,gid)
     now[0]+=301
@@ -167,3 +167,92 @@ def test_active_grant_choices_do_not_offer_unsupported_pause(setup):
     frame=engine.frame(principal(),'grants',gid)
     assert frame['visual']['choices']==['revoke','delete']
     assert 'active' in frame['audio_text']
+
+def proposal(engine,lifetime=3600):
+    return engine.propose(principal(),provider='mock',account='synthetic-account-a',purpose='source.review',actions=['source.read','report.export'],recipient='self',terms='policy-v1',lifetime=lifetime)
+
+@pytest.mark.parametrize('first_lifetime,second_lifetime',[(1,86400),(3600,3600)])
+def test_grant_confirmation_is_bound_to_unique_grant_and_duration(setup,first_lifetime,second_lifetime):
+    engine,*_=setup;first=proposal(engine,first_lifetime);old=engine.frame(principal(),'grants',first)
+    second=proposal(engine,second_lifetime)
+    with pytest.raises(PermissionError):engine.confirm(principal(),second,old['revision'],old['binding'])
+    fresh=engine.frame(principal(),'grants',second)
+    assert fresh['visual']['terms']['lifetime_seconds']==second_lifetime
+    assert 'expires at' in fresh['audio_text'] and 'grant_' not in fresh['audio_text']
+    engine.confirm(principal(),second,fresh['revision'],fresh['binding'])
+
+
+def test_consequential_confirmation_cannot_authorize_sibling_task(setup):
+    engine,*_=setup;gid=grant(engine)
+    first=engine.submit(principal(),gid,'report.export','self');second=engine.submit(principal(),gid,'report.export','self')
+    old=engine.frame(principal(),'tasks',first)
+    with pytest.raises(PermissionError):engine.confirm_task(principal(),second,old['revision'],old['binding'])
+    fresh=engine.frame(principal(),'tasks',second)
+    engine.respond(principal(),'tasks',second,fresh['revision'],'confirm',fresh['binding'])
+
+
+def test_advertised_repair_choice_returns_bound_challenge(setup):
+    engine,store,provider,_=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'source.read','self')
+    engine.run(principal(),tid);frame=engine.frame(principal(),'tasks',tid,visual=False)
+    assert 'repair' in frame['audio_text']
+    result=engine.respond(principal(),'tasks',tid,frame['revision'],'repair',frame['binding'])
+    assert result['state']=='repair_required' and provider.repairs==0
+    assert engine.complete_repair(principal(),result['ticket'],channel='screenless')=='repaired'
+    assert engine.run(principal(),tid)=='verified'
+
+def test_presented_connection_journey_and_distinct_expiry_lifecycles():
+    from orchestrator.synthetic_delegation import MockOAuthAdapter,MockSessionAdapter,MockVaultAdapter
+    from orchestrator.synthetic_intent import SyntheticIntentInteraction
+    now=[100];store=MemoryStore();providers={'oauth':MockOAuthAdapter(lambda:now[0]),'session':MockSessionAdapter(lambda:now[0]),'vault':MockVaultAdapter(lambda:now[0]),'device-only':MockVaultAdapter(lambda:now[0],nonvisual=False)}
+    engine=DelegationEngine(store,providers,enabled=True,clock=lambda:now[0]);interaction=SyntheticIntentInteraction(engine)
+    for mechanism in ['oauth','session','vault']:
+        frame=interaction.start(principal(),mechanism,'screenless')
+        assert 'Delegation duration:' in frame['audio_text'] and frame['visual'] is None
+        frame=interaction.reply(principal(),frame,'confirm','screenless');assert frame['state']=='waiting_repair'
+        frame=interaction.reply(principal(),frame,'repair','screenless');assert frame['state']=='repair_confirmation'
+        frame=interaction.reply(principal(),frame,'verify','screenless');assert frame['state']=='verified'
+        gid=store.read()['tasks'][frame['resource']]['grant']
+        now[0]+=61
+        if mechanism=='vault':providers[mechanism].locked=True
+        next_task=engine.submit(principal(),gid,'source.read','self')
+        outcome=engine.run(principal(),next_task)
+        assert outcome==('verified' if mechanism=='oauth' else 'waiting_repair')
+    assert providers['oauth'].refreshes==1 and providers['vault'].approvals==1
+    frame=interaction.start(principal(),'device-only','screenless');frame=interaction.reply(principal(),frame,'confirm','screenless')
+    assert 'no nonvisual alternative' in frame['audio_text']
+    frame=interaction.reply(principal(),frame,'not_now','screenless');assert frame['state']=='paused'
+
+
+def test_late_verification_and_swapped_task_challenge_rejected(setup):
+    from orchestrator.synthetic_intent import SyntheticIntentInteraction
+    engine,store,provider,_=setup;interaction=SyntheticIntentInteraction(engine);gid=grant(engine)
+    tids=[engine.submit(principal(),gid,'source.read','self') for _ in range(2)]
+    for tid in tids:engine.run(principal(),tid)
+    frame=interaction.current(principal(),'tasks',tids[0],'screenless')
+    challenge=interaction.reply(principal(),frame,'repair','screenless')
+    swapped=dict(challenge,resource=tids[1])
+    with pytest.raises(PermissionError):interaction.reply(principal(),swapped,'verify','screenless')
+    paused=interaction.reply(principal(),challenge,'not_now','screenless')
+    assert paused['state']=='paused'
+    with pytest.raises(PermissionError):interaction.reply(principal(),challenge,'verify','screenless')
+
+
+def test_expiry_mutation_and_expired_grant_confirmation_rejected(setup):
+    engine,store,provider,now=setup;gid=proposal(engine,1);frame=engine.frame(principal(),'grants',gid)
+    now[0]+=2
+    with pytest.raises(PermissionError):engine.confirm(principal(),gid,frame['revision'],frame['binding'])
+    gid=proposal(engine,100);frame=engine.frame(principal(),'grants',gid)
+    state=store.read();state['grants'][gid]['expires']+=100;store.write(state)
+    with pytest.raises(PermissionError):engine.confirm(principal(),gid,frame['revision'],frame['binding'])
+
+def test_intent_start_reuses_authority_and_expired_session_needs_only_repair():
+    from orchestrator.synthetic_delegation import MockSessionAdapter
+    from orchestrator.synthetic_intent import SyntheticIntentInteraction
+    now=[100];store=MemoryStore();provider=MockSessionAdapter(lambda:now[0]);engine=DelegationEngine(store,{'session':provider},enabled=True,clock=lambda:now[0]);interaction=SyntheticIntentInteraction(engine)
+    frame=interaction.start(principal(),'session','screenless')
+    for command in ['confirm','repair','verify']:frame=interaction.reply(principal(),frame,command,'screenless')
+    assert frame['state']=='verified'
+    assert interaction.start(principal(),'session','screenless')['state']=='verified'
+    now[0]+=61
+    assert interaction.start(principal(),'session','screenless')['state']=='waiting_repair'
+    assert len(store.read()['grants'])==1

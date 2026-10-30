@@ -1,46 +1,49 @@
 # Synthetic delegation and multimodal intent reference
 
-Status: bounded mock library, not connected to production ingress or a credential vault.
+Status: bounded connected mock prototype, not a live account client.
 
-`orchestrator.synthetic_delegation` keeps four decisions separate: verified
-Unison identity/unlock, source authentication, an account/purpose/action/recipient
-and terms-bound delegation, and confirmation of a consequential mock action.
-The host must supply a verified `PrincipalContext` and a transactional encrypted
-state store. No HTTP route constructs authority from model text. The constructor
-is disabled by default and accepts only explicit mock provider instances.
+`synthetic-delegation.v2` binds confirmation to the exact grant identity, person,
+account, purpose, actions, recipient, terms, duration, creation/expiry and approval
+deadline. Consequential confirmations additionally bind the exact task identity
+and approval deadline. Expired or mutated terms fail closed. Earlier unmerged v1
+state is deliberately incompatible; no automatic migration or authority expansion.
 
-The replaceable `CredentialUseAdapter` protocol refreshes or brokers credential
-use through opaque handles and verifies action outcomes. The mock models OAuth
-refresh, session reuse and a password-manager broker without network, secrets,
-real MFA, vault reading or live provider effects. It is not a 1Password integration
-and grants no rights to a provider vault. Production adapters remain gated.
+`SyntheticIntentInteraction` connects trusted state to visual and screenless
+command/response flows through an optional renderer fixture bridge. The same
+presented repair choice now requests a bound challenge; explicit simulated
+verification completes it. Late or cross-task challenge responses fail. An
+unchanged active delegation is reused; new authority is not requested per task.
 
-Five dependent tasks share one connection repair. Paused, revoked or expired
-work does not resume through repair. Delegation confirmations and task responses
-are bound to exact revisions and terms; consequential confirmations expire.
-Pending attempts are persisted before provider execution. Existing attempts are
-verified before any continuation and are never automatically re-executed merely
-because verification returns absent/unknown. Such ambiguity stays pending for
-future qualified reconciliation. Pause is not revocation; deletion does not undo
-external effects. Terminal tombstones retain minimal authority state.
+Three simulated credential-use adapters have distinct lifecycle behavior:
+OAuth rotates expired access under a valid refresh lease; session expiry requires
+repair without automatic renewal; vault-use approval expires or locks and requires
+renewed approval. All return opaque handles. No credentials, vault contents,
+actual OAuth, MFA or 1Password integration are used. The protocol remains
+replaceable, but only mock provider instances are qualified.
 
-`intent-experience.v1` derives a semantic visual control tree and a screenless
-spoken-text representation from the same trusted state. The static semantic HTML
-helper is a fallback representation, not an installed interactive UI. Choices
-are returned to the engine as explicit structured responses with revisions.
-No browser destination is presented as the person's goal. Unsupported nonvisual
-provider verification explains the limit and permits pausing; it invents no
-alternative and does not bypass human presence. Mode loss does not grant authority.
+The renderer's `/static/intent-experience.html` is a connected test expression,
+not a production destination. It posts structured choices to the default-disabled
+`/synthetic-intent` bridge, which requires a bound person and an explicitly injected
+mock coordinator. Visual controls and screenless typed commands drive the same
+state transitions. Spoken text is a representation: no ASR/TTS/audio playback or
+participant accessibility qualification is claimed. Unsupported nonvisual provider
+verification explains its limit and preserves progress. No transport destination
+is exposed as the person's goal.
 
-Evidence: `pytest tests/test_synthetic_delegation.py` (unit/simulation), plus the
-workspace encrypted-store restart acceptance test. No actual speech recognition,
-TTS, assistive-device verification, biometrics, participant usability, live OAuth
-or browser session was exercised. The three mock mechanism labels exercise the
-same protocol; they are not three qualified real integrations.
+Five tasks share one repair; paused, revoked and expired work does not resume
+through repair. Pending attempts are stored before provider execution and verified
+before continuation. Absence or uncertainty never automatically repeats an
+existing attempt. Pause does not revoke authority or undo an external effect.
+Deletion retains minimal terminal authority, not proof of physical erasure.
 
-All content is synthetic, including a fixed account/purpose/recipient vocabulary.
-Provider handles are omitted from generated visual/spoken representations and
-no credentials are accepted or logged. Store/key custody, rollback-resistant
-revocation of this delegation ledger, complete external-effect reconciliation,
-production authenticated ingress, cancellation of real remote effects, a secured
-broker process and real accessible challenge support remain release gates.
+Evidence: focused delegation regressions, encrypted-store restart integration,
+and authenticated renderer acceptance through actual visual controls and typed
+screenless choices. Four new regression cases reproduced the review defects before
+fixes. Mobile/desktop, forced colors, enlarged text, reload/mode persistence and
+busy controls are exercised. No model text confers authority.
+
+Remaining gates: production principal/transport deployment, secured broker
+isolation, real provider and accessible device challenges, real speech/assistive
+technology and participant qualification, full external-effect reconciliation,
+ledger rollback resistance and replacement-device key custody. No real data,
+financial effects, runtime deployment or public publication is authorized here.
