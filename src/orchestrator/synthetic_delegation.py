@@ -13,7 +13,7 @@ from typing import Protocol
 from unison_common.principal import PrincipalContext, PrincipalKind
 
 SCHEMA = 'synthetic-delegation.v1'
-ACTIONS = {'read.statement', 'read.document', 'export.report'}
+ACTIONS = {'source.read', 'source.inspect', 'report.export'}
 
 
 def initial_state():
@@ -83,7 +83,7 @@ class DelegationEngine:
         if (provider not in self.providers or not actions or not set(actions) <= ACTIONS
                 or not all(isinstance(v,str) and 0 < len(v) <= 100 for v in (account,purpose,recipient,terms))
                 or account not in {'synthetic-account-a','synthetic-account-b'}
-                or purpose not in {'statement-review','document-review'}
+                or purpose not in {'source.review','source.export'}
                 or recipient not in {'self','synthetic-recipient'} or terms not in {'policy-v1','policy-v2'}
                 or type(lifetime) is not int or not 0 < lifetime <= 86400):
             raise ValueError('bounded explicit delegation required')
@@ -114,7 +114,7 @@ class DelegationEngine:
             self._allowed(grant,action,recipient)
             tid='task_'+secrets.token_urlsafe(16)
             state['tasks'][tid]=dict(person=person, grant=gid, action=action, recipient=recipient,
-                binding=grant['fingerprint'], revision=1, state='confirmation' if action=='export.report' else 'ready',
+                binding=grant['fingerprint'], revision=1, state='confirmation' if action=='report.export' else 'ready',
                 approval=None, attempt=False)
             self.store.write(state)
         return tid
@@ -181,7 +181,7 @@ class DelegationEngine:
             grant=state['grants'][task['grant']]
             self._allowed(grant,task['action'],task['recipient'])
             if task['binding']!=grant['fingerprint']:raise PermissionError('task terms changed')
-            if task['action']=='export.report' and (not task['approval'] or task['approval']['expires']<=self.clock()
+            if task['action']=='report.export' and (not task['approval'] or task['approval']['expires']<=self.clock()
                     or task['approval']['binding']!=self._task_binding(task,grant)):
                 task.update(state='confirmation',revision=task['revision']+1);self.store.write(state);return 'confirmation'
             conn=state['connections'][grant['connection']]; provider=self.providers[conn['provider']]

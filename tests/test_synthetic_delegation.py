@@ -31,7 +31,7 @@ def setup():
 
 
 def grant(engine,**changes):
-    args=dict(provider='mock',account='synthetic-account-a',purpose='statement-review',actions=['read.statement','export.report'],recipient='self',terms='policy-v1')
+    args=dict(provider='mock',account='synthetic-account-a',purpose='source.review',actions=['source.read','report.export'],recipient='self',terms='policy-v1')
     args.update(changes);gid=engine.propose(principal(),**args)
     frame=engine.frame(principal(),'grants',gid)
     engine.confirm(principal(),gid,frame['revision'],frame['binding'])
@@ -44,7 +44,7 @@ def repair(engine,gid,channel='screenless'):
 
 def test_five_tasks_one_repair_resume_only_authorized(setup):
     engine,store,provider,now=setup;gid=grant(engine)
-    tids=[engine.submit(principal(),gid,'read.statement','self') for _ in range(5)]
+    tids=[engine.submit(principal(),gid,'source.read','self') for _ in range(5)]
     for tid in tids:assert engine.run(principal(),tid)=='waiting_repair'
     assert len({engine.repair_ticket(principal(),gid)['challenge'] for _ in tids})==1
     engine.control(principal(),'tasks',tids[0],'pause',store.read()['tasks'][tids[0]]['revision'])
@@ -53,20 +53,20 @@ def test_five_tasks_one_repair_resume_only_authorized(setup):
     assert [engine.run(principal(),tid) for tid in tids]==['paused','revoked','verified','verified','verified']
     assert provider.repairs==1 and len(provider.calls)==3
 
-@pytest.mark.parametrize('field,value',[('account','synthetic-account-b'),('purpose','document-review'),('recipient','synthetic-recipient'),('terms','policy-v2'),('actions',['read.document'])])
+@pytest.mark.parametrize('field,value',[('account','synthetic-account-b'),('purpose','source.export'),('recipient','synthetic-recipient'),('terms','policy-v2'),('actions',['source.inspect'])])
 def test_stale_confirmation_cannot_authorize_changed_terms(setup,field,value):
     engine,*_=setup
-    args=dict(provider='mock',account='synthetic-account-a',purpose='statement-review',actions=['read.statement'],recipient='self',terms='policy-v1')
+    args=dict(provider='mock',account='synthetic-account-a',purpose='source.review',actions=['source.read'],recipient='self',terms='policy-v1')
     first=engine.propose(principal(),**args);old=engine.frame(principal(),'grants',first)
     args[field]=value;new=engine.propose(principal(),**args)
     with pytest.raises(PermissionError):engine.confirm(principal(),new,old['revision'],old['binding'])
 
 
 def test_consequential_confirmation_is_distinct_and_expires(setup):
-    engine,store,provider,now=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'export.report','self')
+    engine,store,provider,now=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'report.export','self')
     assert engine.run(principal(),tid)=='confirmation'
     frame=engine.frame(principal(),'tasks',tid,visual=False)
-    assert frame['visual'] is None and 'export.report' in frame['audio_text']
+    assert frame['visual'] is None and 'report.export' in frame['audio_text']
     engine.respond(principal(),'tasks',tid,frame['revision'],'confirm',frame['binding'])
     assert engine.run(principal(),tid)=='waiting_repair';repair(engine,gid)
     now[0]+=301
@@ -74,7 +74,7 @@ def test_consequential_confirmation_is_distinct_and_expires(setup):
 
 
 def test_not_now_mode_switch_restart_and_late_response(setup):
-    engine,store,provider,now=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'read.statement','self')
+    engine,store,provider,now=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'source.read','self')
     frame=engine.frame(principal(),'tasks',tid)
     engine.respond(principal(),'tasks',tid,frame['revision'],'not_now')
     with pytest.raises(PermissionError):engine.respond(principal(),'tasks',tid,frame['revision'],'resume')
@@ -87,7 +87,7 @@ def test_not_now_mode_switch_restart_and_late_response(setup):
 
 
 def test_late_repair_after_revocation_cannot_reactivate(setup):
-    engine,store,provider,_=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'read.statement','self')
+    engine,store,provider,_=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'source.read','self')
     engine.run(principal(),tid);ticket=engine.repair_ticket(principal(),gid)
     engine.control(principal(),'grants',gid,'revoke',store.read()['grants'][gid]['revision'])
     with pytest.raises(PermissionError):engine.complete_repair(principal(),ticket,channel='screenless')
@@ -97,7 +97,7 @@ def test_late_repair_after_revocation_cannot_reactivate(setup):
 
 
 def test_unsupported_nonvisual_challenge_preserves_progress(setup):
-    engine,store,provider,_=setup;provider.nonvisual=False;gid=grant(engine);tid=engine.submit(principal(),gid,'read.statement','self')
+    engine,store,provider,_=setup;provider.nonvisual=False;gid=grant(engine);tid=engine.submit(principal(),gid,'source.read','self')
     engine.run(principal(),tid)
     assert repair(engine,gid)=='provider_device_verification_required'
     frame=engine.frame(principal(),'tasks',tid,visual=False)
@@ -109,19 +109,19 @@ def test_unsupported_nonvisual_challenge_preserves_progress(setup):
 @pytest.mark.parametrize('mechanism',['oauth','persistent-session','password-manager'])
 def test_refresh_and_reuse_never_exposes_opaque_handle(setup,mechanism,caplog):
     engine,store,provider,_=setup;provider.mechanism=mechanism;gid=grant(engine)
-    first=engine.submit(principal(),gid,'read.statement','self');engine.run(principal(),first);repair(engine,gid)
+    first=engine.submit(principal(),gid,'source.read','self');engine.run(principal(),first);repair(engine,gid)
     assert engine.run(principal(),first)=='verified'
-    second=engine.submit(principal(),gid,'read.statement','self');assert engine.run(principal(),second)=='verified'
+    second=engine.submit(principal(),gid,'source.read','self');assert engine.run(principal(),second)=='verified'
     provider.handles.clear();provider.refreshable=True
-    third=engine.submit(principal(),gid,'read.statement','self');assert engine.run(principal(),third)=='verified'
+    third=engine.submit(principal(),gid,'source.read','self');assert engine.run(principal(),third)=='verified'
     frames=[engine.frame(principal(),'tasks',third,visual=v,audio=a) for v,a in [(True,False),(False,True),(False,False),(True,True)]]
     assert frames[0]['fallback']=='text_available' and frames[2]['fallback']=='no_available_modality'
-    assert '<button' in visual_document(engine.frame(principal(),'grants',engine.propose(principal(),provider='mock',account='synthetic-account-a',purpose='statement-review',actions=['read.statement'],recipient='self',terms='policy-v1')))
+    assert '<button' in visual_document(engine.frame(principal(),'grants',engine.propose(principal(),provider='mock',account='synthetic-account-a',purpose='source.review',actions=['source.read'],recipient='self',terms='policy-v1')))
     assert provider.repairs==1 and 'opaque_' not in json.dumps(frames)+caplog.text
 
 
 def test_ambiguous_effect_verified_before_any_retry(setup):
-    engine,store,provider,now=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'read.statement','self')
+    engine,store,provider,now=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'source.read','self')
     engine.run(principal(),tid);repair(engine,gid);provider.timeout_after_effect=True
     assert engine.run(principal(),tid)=='verified'
     assert engine.run(principal(),tid)=='verified' and len(provider.calls)==1
@@ -130,15 +130,15 @@ def test_ambiguous_effect_verified_before_any_retry(setup):
 def test_scope_person_expiry_and_default_disable(setup):
     engine,store,provider,now=setup;gid=grant(engine)
     with pytest.raises(PermissionError):engine.frame(principal('bob'),'grants',gid)
-    with pytest.raises(PermissionError):engine.submit(principal(scopes=('delegation.read',)),gid,'read.statement','self')
+    with pytest.raises(PermissionError):engine.submit(principal(scopes=('delegation.read',)),gid,'source.read','self')
     with pytest.raises(PermissionError):DelegationEngine(store,{'mock':provider})
-    tid=engine.submit(principal(),gid,'read.statement','self');now[0]=4000
+    tid=engine.submit(principal(),gid,'source.read','self');now[0]=4000
     with pytest.raises(PermissionError):engine.run(principal(),tid)
     now[0]=10001
     with pytest.raises(PermissionError):engine.frame(principal(),'grants',gid)
 
 def test_inflight_attempt_never_reexecuted_when_verification_unknown(setup):
-    engine,store,provider,_=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'read.statement','self')
+    engine,store,provider,_=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'source.read','self')
     engine.run(principal(),tid);repair(engine,gid)
     state=store.read();state['tasks'][tid].update(attempt=True,state='pending_verification');store.write(state)
     assert engine.run(principal(),tid)=='pending_verification' and not provider.calls
@@ -146,16 +146,16 @@ def test_inflight_attempt_never_reexecuted_when_verification_unknown(setup):
 
 def test_pause_proposal_does_not_grant_authority(setup):
     engine,store,provider,_=setup
-    gid=engine.propose(principal(),provider='mock',account='synthetic-account-a',purpose='statement-review',actions=['read.statement'],recipient='self',terms='policy-v1')
+    gid=engine.propose(principal(),provider='mock',account='synthetic-account-a',purpose='source.review',actions=['source.read'],recipient='self',terms='policy-v1')
     frame=engine.frame(principal(),'grants',gid)
     engine.respond(principal(),'grants',gid,frame['revision'],'not_now')
     with pytest.raises(PermissionError):engine.confirm(principal(),gid,frame['revision'],frame['binding'])
-    with pytest.raises(PermissionError):engine.submit(principal(),gid,'read.statement','self')
+    with pytest.raises(PermissionError):engine.submit(principal(),gid,'source.read','self')
 
 
 def test_concurrent_runs_produce_one_verified_effect(setup):
     from concurrent.futures import ThreadPoolExecutor
-    engine,store,provider,_=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'read.statement','self')
+    engine,store,provider,_=setup;gid=grant(engine);tid=engine.submit(principal(),gid,'source.read','self')
     engine.run(principal(),tid);repair(engine,gid)
     with ThreadPoolExecutor(max_workers=4) as pool:
         outcomes=list(pool.map(lambda _:engine.run(principal(),tid),range(8)))
