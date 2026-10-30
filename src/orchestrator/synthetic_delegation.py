@@ -243,6 +243,8 @@ class DelegationEngine:
                 terms=item['spec'];binding=item['fingerprint'];choices=['confirm','not_now']
             elif collection=='tasks' and status=='confirmation':
                 grant=state['grants'][item['grant']];terms=dict(grant['spec'],action=item['action']);binding=self._task_binding(item,grant);choices=['confirm','not_now']
+            elif collection=='grants' and status=='active':choices=['revoke','delete']
+            elif status in {'verified','revoked'}:choices=['delete']
             elif status=='waiting_repair':choices=['repair','not_now','revoke','delete']
             elif status=='paused':choices=['resume','revoke','delete']
             elif status not in {'revoked','deleted','verified'}:choices=['stop','revoke','delete']
@@ -254,6 +256,7 @@ class DelegationEngine:
                 'verified':'The mock provider verified completion.',
                 'confirmation':'Confirm this exact consequential mock action.',
                 'proposed':'Review this source delegation separately from signing in to Unison.',
+                'active':'Source delegation is active. This is separate from signing in to Unison.',
                 'ready':'Ready under the current delegation.'}.get(status,'Unavailable')
             # Only controlled status prose and explicit non-secret authority terms. No raw provider/source text.
             if status=='waiting_repair':
@@ -263,7 +266,7 @@ class DelegationEngine:
                     if not visual: choices=['not_now','revoke','delete']
                 else: description += ' A simulated nonvisual verification path is available.'
             content=dict(description=description,terms=terms,choices=choices)
-            spoken=description + (' Terms: '+json.dumps(terms,sort_keys=True) if terms else '') + ' Choices: '+', '.join(choices)
+            spoken=description + (' Terms: '+json.dumps(terms,sort_keys=True) if terms else '') + ' Choices: '+', '.join(choice.replace('_',' ') for choice in choices)
 
             return dict(schema='intent-experience.v1',resource=identifier,revision=item['revision'],binding=binding,
                 state=status,visual=content if visual else None,audio_text=spoken if audio else None,

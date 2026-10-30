@@ -161,3 +161,9 @@ def test_concurrent_runs_produce_one_verified_effect(setup):
         outcomes=list(pool.map(lambda _:engine.run(principal(),tid),range(8)))
     assert set(outcomes)<={'pending_verification','verified'}
     assert engine.run(principal(),tid)=='verified' and len(provider.calls)==1
+
+def test_active_grant_choices_do_not_offer_unsupported_pause(setup):
+    engine,*_=setup;gid=grant(engine)
+    frame=engine.frame(principal(),'grants',gid)
+    assert frame['visual']['choices']==['revoke','delete']
+    assert 'active' in frame['audio_text']
