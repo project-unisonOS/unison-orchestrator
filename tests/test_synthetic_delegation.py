@@ -256,3 +256,20 @@ def test_intent_start_reuses_authority_and_expired_session_needs_only_repair():
     now[0]+=61
     assert interaction.start(principal(),'session','screenless')['state']=='waiting_repair'
     assert len(store.read()['grants'])==1
+
+def test_mock_oauth_refresh_lease_is_not_extended_by_another_connection():
+    from orchestrator.synthetic_delegation import MockOAuthAdapter
+    now=[100];provider=MockOAuthAdapter(lambda:now[0])
+    first=provider.complete_repair('first-connection');now[0]+=3601
+    second=provider.complete_repair('second-connection')
+    assert provider.refresh(first) is None
+    assert provider.refresh(second)==second
+
+
+def test_mock_vault_repair_does_not_unlock_old_other_connection_handle():
+    from orchestrator.synthetic_delegation import MockVaultAdapter
+    provider=MockVaultAdapter(lambda:100)
+    first=provider.complete_repair('first-connection');provider.locked=True
+    second=provider.complete_repair('second-connection')
+    assert provider.refresh(first) is None
+    assert provider.refresh(second)==second

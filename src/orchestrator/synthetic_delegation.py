@@ -342,14 +342,15 @@ def visual_document(frame):
 class MockOAuthAdapter(MockCredentialAdapter):
     """Rotating synthetic access lease with a separately revocable refresh lease."""
     def __init__(self, clock=time.time):
-        super().__init__('oauth');self.clock=clock;self.access_until={};self.refresh_until=0;self.refreshes=0
+        super().__init__('oauth');self.clock=clock;self.access_until={};self.refresh_until={};self.refreshes=0
     def complete_repair(self, challenge_id):
-        handle=super().complete_repair(challenge_id);self.access_until[handle]=self.clock()+30;self.refresh_until=self.clock()+3600;return handle
+        handle=super().complete_repair(challenge_id);self.access_until[handle]=self.clock()+30;self.refresh_until[handle]=self.clock()+3600;return handle
     def refresh(self, handle):
         if handle in self.handles and self.access_until.get(handle,0)>self.clock():return handle
-        if handle is not None and self.refresh_until>self.clock():
-            self.handles.discard(handle);new='opaque_'+secrets.token_urlsafe(16);self.handles.add(new)
-            self.access_until[new]=self.clock()+30;self.refreshes+=1;return new
+        if handle is not None and self.refresh_until.get(handle,0)>self.clock():
+            expiry=self.refresh_until.pop(handle);self.handles.discard(handle)
+            new='opaque_'+secrets.token_urlsafe(16);self.handles.add(new)
+            self.access_until[new]=self.clock()+30;self.refresh_until[new]=expiry;self.refreshes+=1;return new
         return None
 
 
@@ -368,6 +369,8 @@ class MockVaultAdapter(MockCredentialAdapter):
     def __init__(self, clock=time.time, nonvisual=True):
         super().__init__('password-manager',nonvisual=nonvisual);self.clock=clock;self.locked=True;self.lease_until={};self.approvals=0
     def complete_repair(self, challenge_id):
+        if self.locked:
+            self.handles.clear();self.lease_until.clear()
         self.locked=False;self.approvals+=1;handle=super().complete_repair(challenge_id)
         self.lease_until[handle]=self.clock()+120;return handle
     def refresh(self, handle):
